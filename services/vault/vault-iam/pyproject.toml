@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vault-iam"
+version = "0.1.0"
+description = "Neuro-Network Vault-IAM: Identity resolution, RBAC, and EntraID sync"
+requires-python = ">=3.11"
+dependencies = [
+    "neurokit @ git+https://github.com/billyFelton/NeuroKit.git@v0.2.0",
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "psycopg[binary]>=3.1.0",
+    "psycopg_pool>=3.1.0",
+    "httpx>=0.27.0",
+    "pyjwt>=2.8.0",
+    "passlib[bcrypt]>=1.7.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+    "httpx>=0.27.0",
+]
