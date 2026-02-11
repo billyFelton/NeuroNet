@@ -1,4 +1,46 @@
+# ============================================================
+# NeuroNet — Full Stack Deployment
+# ============================================================
+#
+# Usage:
+#   cp .env.example .env   # edit with real values
+#   docker network create neuro-network
+#   docker compose up -d
+#
+# This brings up:
+#   - RabbitMQ (message bus)
+#   - HashiCorp Vault (secrets)
+#   - Postgres (IAM + audit)
+#   - Vault-IAM (identity, RBAC)
+#   - Resolver (RBAC gateway)
+#   - Connector-EntraID (Graph API)
+#   - Connector-Slack (user-token agent)
+#   - Agent-Worker-Claude (AI)
+
 services:
+
+  # ── Infrastructure ────────────────────────────────────────
+
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: neuro-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:-neuro}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/neuro}
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # Management UI
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      - neuro-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   hcvault:
     image: hashicorp/vault:1.15
@@ -17,11 +59,13 @@ services:
           "disable_mlock": false
         }
     command: server
+    ports:
+      - "8200:8200"     # Vault UI + API
     volumes:
       - hcvault-data:/vault/data
-      - ./hcvault/policies:/vault/policies:ro
+      - ../services/vault/hcvault/policies:/vault/policies:ro
     networks:
-      - vault-internal
+      - neuro-network
     healthcheck:
       test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
       interval: 10s
@@ -39,18 +83,20 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
     volumes:
       - vault-db-data:/var/lib/postgresql/data
-      - ./db/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+      - ../services/vault/db/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
     networks:
-      - vault-internal
+      - neuro-network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U neuro -d neuro_vault"]
       interval: 10s
       timeout: 5s
       retries: 5
 
+  # ── Services ──────────────────────────────────────────────
+
   vault-iam:
     build:
-      context: ./vault-iam
+      context: ../services/vault/vault-iam
       args:
         NEUROKIT_VERSION: ${NEUROKIT_VERSION:-v0.2.0}
     container_name: neuro-vault-iam
@@ -62,41 +108,145 @@ services:
         condition: service_healthy
     environment:
       NEURO_SERVICE_NAME: vault-iam
-      NEURO_SERVICE_VERSION: "0.1.0"
       NEURO_ENVIRONMENT: ${NEURO_ENVIRONMENT:-development}
       POSTGRES_HOST: vault-db
-      POSTGRES_PORT: 5432
       POSTGRES_DB: neuro_vault
       POSTGRES_USER: vault_iam
       POSTGRES_PASSWORD: ${VAULT_IAM_DB_PASSWORD:?Set VAULT_IAM_DB_PASSWORD}
+      VAULT_IAM_JWT_SECRET: ${VAULT_IAM_JWT_SECRET:?Set VAULT_IAM_JWT_SECRET}
+      VAULT_IAM_MASTER_SERVICE_TOKEN: ${VAULT_IAM_MASTER_SERVICE_TOKEN:-}
       HCVAULT_URL: http://hcvault:8200
       HCVAULT_ROLE_ID: ${VAULT_IAM_ROLE_ID:-}
       HCVAULT_SECRET_ID: ${VAULT_IAM_SECRET_ID:-}
-      VAULT_IAM_JWT_SECRET: ${VAULT_IAM_JWT_SECRET:?Set VAULT_IAM_JWT_SECRET}
-      VAULT_IAM_MASTER_SERVICE_TOKEN: ${VAULT_IAM_MASTER_SERVICE_TOKEN:-}
       ENTRAID_SYNC_ENABLED: ${ENTRAID_SYNC_ENABLED:-false}
       ENTRAID_TENANT_ID: ${ENTRAID_TENANT_ID:-}
       ENTRAID_CLIENT_ID: ${ENTRAID_CLIENT_ID:-}
       ENTRAID_CLIENT_SECRET: ${ENTRAID_CLIENT_SECRET:-}
       ENTRAID_SYNC_INTERVAL: ${ENTRAID_SYNC_INTERVAL:-300}
-      RABBITMQ_HOST: ${RABBITMQ_HOST:-rabbitmq}
-      RABBITMQ_PORT: ${RABBITMQ_PORT:-5672}
-      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-neuro}
-      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-}
-      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/neuro}
-      CONDUCTOR_URL: ${CONDUCTOR_URL:-http://conductor:8080}
-    networks:
-      - vault-internal
-      - neuro-network
     ports:
-      - "${VAULT_IAM_PORT:-8080}:8080"
+      - "8080:8080"
+    networks:
+      - neuro-network
+
+  resolver:
+    build:
+      context: ../services/resolver
+      args:
+        NEUROKIT_VERSION: ${NEUROKIT_VERSION:-v0.2.0}
+    container_name: neuro-resolver
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      vault-iam:
+        condition: service_started
+    environment:
+      NEURO_SERVICE_NAME: resolver
+      NEURO_ENVIRONMENT: ${NEURO_ENVIRONMENT:-development}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-neuro}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/neuro}
+      HCVAULT_URL: http://hcvault:8200
+      HCVAULT_ROLE_ID: ${RESOLVER_ROLE_ID:-}
+      HCVAULT_SECRET_ID: ${RESOLVER_SECRET_ID:-}
+      VAULT_IAM_URL: http://vault-iam:8080
+      VAULT_IAM_SERVICE_TOKEN: ${VAULT_IAM_MASTER_SERVICE_TOKEN:-}
+    networks:
+      - neuro-network
+
+  # ── Connectors ────────────────────────────────────────────
+
+  connector-entraid:
+    build:
+      context: ../connectors/entraid
+      args:
+        NEUROKIT_VERSION: ${NEUROKIT_VERSION:-v0.2.0}
+    container_name: neuro-connector-entraid
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      hcvault:
+        condition: service_healthy
+    environment:
+      NEURO_SERVICE_NAME: connector-entraid
+      NEURO_ENVIRONMENT: ${NEURO_ENVIRONMENT:-development}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-neuro}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/neuro}
+      HCVAULT_URL: http://hcvault:8200
+      HCVAULT_ROLE_ID: ${ENTRAID_CONNECTOR_ROLE_ID:-}
+      HCVAULT_SECRET_ID: ${ENTRAID_CONNECTOR_SECRET_ID:-}
+      VAULT_IAM_URL: http://vault-iam:8080
+      VAULT_IAM_SERVICE_TOKEN: ${VAULT_IAM_MASTER_SERVICE_TOKEN:-}
+    networks:
+      - neuro-network
+
+  connector-slack:
+    build:
+      context: ../connectors/slack
+      args:
+        NEUROKIT_VERSION: ${NEUROKIT_VERSION:-v0.2.0}
+    container_name: neuro-connector-slack
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      hcvault:
+        condition: service_healthy
+      resolver:
+        condition: service_started
+    environment:
+      NEURO_SERVICE_NAME: connector-slack
+      NEURO_ENVIRONMENT: ${NEURO_ENVIRONMENT:-development}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-neuro}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/neuro}
+      HCVAULT_URL: http://hcvault:8200
+      HCVAULT_ROLE_ID: ${SLACK_CONNECTOR_ROLE_ID:-}
+      HCVAULT_SECRET_ID: ${SLACK_CONNECTOR_SECRET_ID:-}
+      VAULT_IAM_URL: http://vault-iam:8080
+      VAULT_IAM_SERVICE_TOKEN: ${VAULT_IAM_MASTER_SERVICE_TOKEN:-}
+    networks:
+      - neuro-network
+
+  # ── Agents ────────────────────────────────────────────────
+
+  agent-worker-claude:
+    build:
+      context: ../agents/worker-claude
+      args:
+        NEUROKIT_VERSION: ${NEUROKIT_VERSION:-v0.2.0}
+    container_name: neuro-agent-claude
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      hcvault:
+        condition: service_healthy
+    environment:
+      NEURO_SERVICE_NAME: agent-worker-claude
+      NEURO_ENVIRONMENT: ${NEURO_ENVIRONMENT:-development}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-neuro}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/neuro}
+      HCVAULT_URL: http://hcvault:8200
+      HCVAULT_ROLE_ID: ${CLAUDE_WORKER_ROLE_ID:-}
+      HCVAULT_SECRET_ID: ${CLAUDE_WORKER_SECRET_ID:-}
+      VAULT_IAM_URL: http://vault-iam:8080
+      VAULT_IAM_SERVICE_TOKEN: ${VAULT_IAM_MASTER_SERVICE_TOKEN:-}
+    networks:
+      - neuro-network
 
 volumes:
+  rabbitmq-data:
   hcvault-data:
   vault-db-data:
 
 networks:
-  vault-internal:
-    internal: true
   neuro-network:
-    external: true
+    name: neuro-network
