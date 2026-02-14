@@ -82,8 +82,10 @@ services:
       POSTGRES_DB: neuro_vault
       POSTGRES_USER: neuro
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      VAULT_IAM_DB_PASSWORD: ${VAULT_IAM_DB_PASSWORD:?Set VAULT_IAM_DB_PASSWORD}
     volumes:
       - vault-db-data:/var/lib/postgresql/data
+      - ../services/vault/db/000_users.sh:/docker-entrypoint-initdb.d/000_users.sh:ro
       - ../services/vault/db/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
     networks:
       - neuro-network
@@ -185,6 +187,97 @@ services:
     networks:
       - neuro-network
 
+  connector-email:
+    build:
+      context: ../connectors/email
+      args:
+        NEUROKIT_VERSION: ${NEUROKIT_VERSION:-v0.2.0}
+    container_name: neuro-connector-email
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      hcvault:
+        condition: service_healthy
+    environment:
+      NEURO_SERVICE_NAME: connector-email
+      NEURO_ENVIRONMENT: ${NEURO_ENVIRONMENT:-development}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-neuro}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/neuro}
+      HCVAULT_URL: http://hcvault:8200
+      HCVAULT_ROLE_ID: ${EMAIL_CONNECTOR_ROLE_ID:-}
+      HCVAULT_SECRET_ID: ${EMAIL_CONNECTOR_SECRET_ID:-}
+      VAULT_IAM_URL: http://vault-iam:8080
+      VAULT_IAM_SERVICE_TOKEN: ${VAULT_IAM_MASTER_SERVICE_TOKEN:-}
+    networks:
+      - neuro-network
+
+  connector-wazuh:
+    build:
+      context: ../connectors/wazuh
+      args:
+        NEUROKIT_VERSION: ${NEUROKIT_VERSION:-v0.2.0}
+    container_name: neuro-connector-wazuh
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      hcvault:
+        condition: service_healthy
+      vault-iam:
+        condition: service_started
+    environment:
+      NEURO_SERVICE_NAME: connector-wazuh
+      NEURO_ENVIRONMENT: ${NEURO_ENVIRONMENT:-development}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-neuro}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/neuro}
+      HCVAULT_URL: http://hcvault:8200
+      HCVAULT_ROLE_ID: ${WAZUH_CONNECTOR_ROLE_ID:-}
+      HCVAULT_SECRET_ID: ${WAZUH_CONNECTOR_SECRET_ID:-}
+      VAULT_IAM_URL: http://vault-iam:8080
+      VAULT_IAM_SERVICE_TOKEN: ${VAULT_IAM_MASTER_SERVICE_TOKEN:-}
+      WAZUH_VAULT_SECRET: wazuh
+      WAZUH_ROUTING_PREFIX: wazuh
+      WAZUH_INSTANCE_LABEL: desktops
+    networks:
+      - neuro-network
+
+  connector-wazuh-infra:
+    build:
+      context: ../connectors/wazuh
+      args:
+        NEUROKIT_VERSION: ${NEUROKIT_VERSION:-v0.2.0}
+    container_name: neuro-connector-wazuh-infra
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      hcvault:
+        condition: service_healthy
+      vault-iam:
+        condition: service_started
+    environment:
+      NEURO_SERVICE_NAME: connector-wazuh-infra
+      NEURO_ENVIRONMENT: ${NEURO_ENVIRONMENT:-development}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-neuro}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/neuro}
+      HCVAULT_URL: http://hcvault:8200
+      HCVAULT_ROLE_ID: ${WAZUH_INFRA_ROLE_ID:-}
+      HCVAULT_SECRET_ID: ${WAZUH_INFRA_SECRET_ID:-}
+      VAULT_IAM_URL: http://vault-iam:8080
+      VAULT_IAM_SERVICE_TOKEN: ${VAULT_IAM_MASTER_SERVICE_TOKEN:-}
+      WAZUH_VAULT_SECRET: wazuh-infra
+      WAZUH_ROUTING_PREFIX: wazuh-infra
+      WAZUH_INSTANCE_LABEL: infrastructure
+    networks:
+      - neuro-network
+
   connector-slack:
     build:
       context: ../connectors/slack
@@ -214,6 +307,78 @@ services:
     networks:
       - neuro-network
 
+  # ── Scheduler ─────────────────────────────────────────────
+
+  scheduler:
+    build:
+      context: ../services/scheduler
+      args:
+        NEUROKIT_VERSION: ${NEUROKIT_VERSION:-v0.2.0}
+    container_name: neuro-scheduler
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      hcvault:
+        condition: service_healthy
+      vault-db:
+        condition: service_started
+    environment:
+      NEURO_SERVICE_NAME: scheduler
+      NEURO_ENVIRONMENT: ${NEURO_ENVIRONMENT:-development}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-neuro}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/neuro}
+      HCVAULT_URL: http://hcvault:8200
+      HCVAULT_ROLE_ID: ${SCHEDULER_ROLE_ID:-}
+      HCVAULT_SECRET_ID: ${SCHEDULER_SECRET_ID:-}
+      VAULT_IAM_URL: http://vault-iam:8080
+      VAULT_IAM_SERVICE_TOKEN: ${VAULT_IAM_MASTER_SERVICE_TOKEN:-}
+      KB_DB_HOST: vault-db
+      KB_DB_USER: vault_iam
+      KB_DB_PASSWORD: ${VAULT_IAM_DB_PASSWORD}
+      KB_DB_NAME: neuro_vault
+      KEVIN_MAILBOX: kevin@heads-up.com
+    networks:
+      - neuro-network
+
+  # ── Audit ──────────────────────────────────────────────────
+
+  vault-audit:
+    build:
+      context: ../services/vault-audit
+      args:
+        NEUROKIT_VERSION: ${NEUROKIT_VERSION:-v0.2.0}
+    container_name: neuro-vault-audit
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      vault-db:
+        condition: service_started
+    environment:
+      NEURO_SERVICE_NAME: vault-audit
+      NEURO_ENVIRONMENT: ${NEURO_ENVIRONMENT:-development}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-neuro}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/neuro}
+      HCVAULT_URL: http://hcvault:8200
+      HCVAULT_ROLE_ID: ${VAULT_AUDIT_ROLE_ID:-}
+      HCVAULT_SECRET_ID: ${VAULT_AUDIT_SECRET_ID:-}
+      VAULT_IAM_URL: http://vault-iam:8080
+      VAULT_IAM_SERVICE_TOKEN: ${VAULT_IAM_MASTER_SERVICE_TOKEN:-}
+      KB_DB_HOST: vault-db
+      KB_DB_USER: vault_iam
+      KB_DB_PASSWORD: ${VAULT_IAM_DB_PASSWORD}
+      KB_DB_NAME: neuro_vault
+      AUDIT_LOG_DIR: /var/log/neuronet/audit
+    volumes:
+      - audit-logs:/var/log/neuronet/audit
+    networks:
+      - neuro-network
+
   # ── Agents ────────────────────────────────────────────────
 
   agent-worker-claude:
@@ -240,6 +405,10 @@ services:
       HCVAULT_SECRET_ID: ${CLAUDE_WORKER_SECRET_ID:-}
       VAULT_IAM_URL: http://vault-iam:8080
       VAULT_IAM_SERVICE_TOKEN: ${VAULT_IAM_MASTER_SERVICE_TOKEN:-}
+      KB_DB_HOST: vault-db
+      KB_DB_USER: vault_iam
+      KB_DB_PASSWORD: ${VAULT_IAM_DB_PASSWORD}
+      KB_DB_NAME: neuro_vault
     networks:
       - neuro-network
 
@@ -247,6 +416,7 @@ volumes:
   rabbitmq-data:
   hcvault-data:
   vault-db-data:
+  audit-logs:
 
 networks:
   neuro-network:

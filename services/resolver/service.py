@@ -19,6 +19,7 @@ Message Flow:
 
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from neurokit.envelope import (
@@ -52,13 +53,63 @@ class Intent:
 # In production, the Agent Router or an LLM classifier would handle this.
 # For now, keyword matching gets us a working loop.
 INTENT_PATTERNS = [
-    # Security / Wazuh
+    # ── Scheduler (most specific — must be checked before broad patterns) ──
+    # Scheduler — modify (enable/disable/change schedule)
+    {
+        "pattern": r"\b(enable|disable|pause|resume|stop|start|change|update|modify|set)\s+.*(task|sweep|monitor|schedule|summary|cron|job)\b",
+        "intent": Intent(
+            name="scheduler_modify",
+            resources=[("scheduler", "manage")],
+            data_queries=[{"routing_key": "scheduler.command.modify", "type": "scheduler-modify"}],
+        ),
+    },
+    # Scheduler — run now
+    {
+        "pattern": r"\b(run|trigger|execute|do)\s+.*(sweep|scan|summary|monitor|task)\s*(now|immediately)?\b",
+        "intent": Intent(
+            name="scheduler_run",
+            resources=[("scheduler", "manage")],
+            data_queries=[{"routing_key": "scheduler.command.run", "type": "scheduler-run"}],
+        ),
+    },
+    # Scheduler — list tasks
+    {
+        "pattern": r"\b(scheduled?\s+tasks?|your\s+(scheduled?|routine|tasks?|jobs?)|what\s+(do\s+you|are\s+you)\s+run|cron|recurring|proactive\s+tasks?|your\s+schedule)\b",
+        "intent": Intent(
+            name="scheduler_list",
+            resources=[("scheduler", "query")],
+            data_queries=[{"routing_key": "scheduler.command.list", "type": "scheduler-list"}],
+        ),
+    },
+    # ── Security / Wazuh ──
+    # Infrastructure-specific
+    {
+        "pattern": r"\b(infra(structure)?\s+(alert|alerts|agent|agents|vuln|siem)|server\s+(alert|alerts|agent|agents)|wazuh.infra)\b",
+        "intent": Intent(
+            name="infra_alerts",
+            resources=[("wazuh-alerts", "query")],
+            data_queries=[{"routing_key": "wazuh-infra.query.alerts", "type": "infra-alerts"}],
+        ),
+    },
+    # Desktop-specific
+    {
+        "pattern": r"\b(desktop\s+(alert|alerts|agent|agents)|workstation\s+(alert|alerts)|endpoint\s+alert|wazuh.desktop)\b",
+        "intent": Intent(
+            name="desktop_alerts",
+            resources=[("wazuh-alerts", "query")],
+            data_queries=[{"routing_key": "wazuh.query.alerts", "type": "desktop-alerts"}],
+        ),
+    },
+    # Generic (queries BOTH instances)
     {
         "pattern": r"\b(alert|alerts|security\s+event|siem|threat|wazuh)\b",
         "intent": Intent(
             name="security_alerts",
             resources=[("wazuh-alerts", "query")],
-            data_queries=[{"routing_key": "wazuh.query.alerts", "type": "alerts"}],
+            data_queries=[
+                {"routing_key": "wazuh.query.alerts", "type": "desktop-alerts"},
+                {"routing_key": "wazuh-infra.query.alerts", "type": "infra-alerts"},
+            ],
         ),
     },
     {
@@ -66,7 +117,10 @@ INTENT_PATTERNS = [
         "intent": Intent(
             name="vulnerability_query",
             resources=[("wazuh-vulnerability", "query")],
-            data_queries=[{"routing_key": "wazuh.query.vulnerabilities", "type": "vulnerabilities"}],
+            data_queries=[
+                {"routing_key": "wazuh.query.vulnerabilities", "type": "desktop-vulns"},
+                {"routing_key": "wazuh-infra.query.vulnerabilities", "type": "infra-vulns"},
+            ],
         ),
     },
     {
@@ -74,7 +128,10 @@ INTENT_PATTERNS = [
         "intent": Intent(
             name="agent_status",
             resources=[("wazuh-agents", "query")],
-            data_queries=[{"routing_key": "wazuh.query.agents", "type": "agents"}],
+            data_queries=[
+                {"routing_key": "wazuh.query.agents", "type": "desktop-agents"},
+                {"routing_key": "wazuh-infra.query.agents", "type": "infra-agents"},
+            ],
         ),
     },
     # Identity / EntraID
@@ -103,7 +160,7 @@ INTENT_PATTERNS = [
         ),
     },
     {
-        "pattern": r"\b(user\s+info|user\s+profile|look\s*up\s+user|account\s+status|who\s+is)\b",
+        "pattern": r"\b(user\s+info|user\s+profile|look\s*up\s+user|account\s+status|who\s+is|entra\s*id?\s+profile|tell\s+me\s+about\s+\S+@|profile\s+for\s+\S+@|check\s+on\s+\S+@|disable\s+\S+@|block\s+\S+@)\b",
         "intent": Intent(
             name="user_lookup",
             resources=[("entra-users", "view")],
@@ -132,6 +189,42 @@ INTENT_PATTERNS = [
         "intent": Intent(
             name="audit_query",
             resources=[("audit-logs", "query")],
+        ),
+    },
+    # Email — search specific mailbox (most specific, must be first)
+    {
+        "pattern": r"(search\s+\S+@\S+|check\s+\S+@\S+.*(mail|inbox)|look\s+(in|at)\s+\S+@\S+|emails?\s+(from|to)\s+\S+@\S+|show\s+(me\s+)?emails?\s+(in|from|for)\s+\S+@|get\s+emails?\s+(from|in)\s+\S+@|\S+@\S+.*(inbox|mailbox|emails?).*(?:for|with|about|contain|subject))",
+        "intent": Intent(
+            name="email_search_mailbox",
+            resources=[("email-investigation", "query")],
+            data_queries=[{"routing_key": "email.command.search_mailbox", "type": "email-search"}],
+        ),
+    },
+    # Email — org-wide search
+    {
+        "pattern": r"\b(search\s+(all\s+)?(mailboxes|emails?\s+org|company\s+email|everyone.s?\s+email)|org.wide\s+search|ediscovery|find\s+emails?\s+(across|in\s+all|company))\b",
+        "intent": Intent(
+            name="email_search_org",
+            resources=[("email-investigation", "query")],
+            data_queries=[{"routing_key": "email.command.search_org", "type": "email-search-org"}],
+        ),
+    },
+    # Email — send
+    {
+        "pattern": r"\b(send\s+(an?\s+)?email|write\s+to|compose|draft\s+(an?\s+)?email|send\s+\S+@)\b",
+        "intent": Intent(
+            name="email_send",
+            resources=[("email", "send")],
+            data_queries=[{"routing_key": "email.command.send", "type": "email-send"}],
+        ),
+    },
+    # Email — check inbox
+    {
+        "pattern": r"\b(inbox|check\s+(my\s+)?mail|check\s+(my\s+)?email|unread|my\s+email|read\s+email|show\s+(my\s+)?mail)\b",
+        "intent": Intent(
+            name="email_list",
+            resources=[("email", "query")],
+            data_queries=[{"routing_key": "email.command.list", "type": "email-list"}],
         ),
     },
 ]
@@ -168,12 +261,31 @@ class ResolverService(BaseService):
             routing_keys=[
                 "entraid.response.*",
                 "wazuh.response.*",
+                "wazuh-infra.response.*",
+                "email.response.*",
+                "scheduler.response.*",
             ],
         )
         self.rmq.consume(self.data_responses, self._handle_data_response)
 
         # Track pending data fetches: correlation_id → context
         self._pending_data: Dict[str, Dict] = {}
+
+        # Schedule periodic timeout check every 5 seconds
+        self._schedule_timeout_check()
+
+    def _schedule_timeout_check(self) -> None:
+        """Schedule periodic check for timed-out data requests."""
+        try:
+            if self.rmq._connection and not self.rmq._connection.is_closed:
+                self.rmq._connection.call_later(5, self._periodic_timeout_check)
+        except Exception:
+            pass  # Non-fatal — timeout check will still run on next message
+
+    def _periodic_timeout_check(self) -> None:
+        """Called every 5 seconds by pika to check for stale pending requests."""
+        self._check_pending_timeouts()
+        self._schedule_timeout_check()  # Reschedule
 
     def handle_message(self, envelope: MessageEnvelope) -> None:
         """
@@ -185,6 +297,9 @@ class ResolverService(BaseService):
         4. If permitted: fetch data and forward to AI
         5. If denied: return error to originating connector
         """
+        # Check for any timed-out data requests
+        self._check_pending_timeouts()
+
         text = envelope.payload.get("text", "")
         actor = envelope.actor
 
@@ -215,8 +330,8 @@ class ResolverService(BaseService):
         # ── Step 2: Classify intent ─────────────────────────────────
         intent = self._classify_intent(text)
         logger.info(
-            "User %s intent: %s (roles: %s)",
-            actor.email, intent.name, actor.roles,
+            "User %s intent: %s (roles: %s) text: %.100s",
+            actor.email, intent.name, actor.roles, text,
         )
 
         # ── Step 3: RBAC check ──────────────────────────────────────
@@ -326,9 +441,19 @@ class ResolverService(BaseService):
                     "query_type": query["type"],
                 },
             )
+            # Set reply_to so the connector's response routes back via the exchange
+            # e.g., "wazuh.query.alerts" → "wazuh.response.alerts"
+            # e.g., "email.command.list" → "email.response.list"
+            reply_key = query["routing_key"]
+            if ".query." in reply_key:
+                child.reply_to = reply_key.replace(".query.", ".response.")
+            elif ".command." in reply_key:
+                child.reply_to = reply_key.replace(".command.", ".response.")
+            else:
+                child.reply_to = reply_key + ".response"
             self.rmq.publish(query["routing_key"], child)
             data_context["requested_data"].append(query["type"])
-            logger.debug("Dispatched data query: %s", query["routing_key"])
+            logger.debug("Dispatched data query: %s (reply_to: %s)", query["routing_key"], child.reply_to)
 
         # Track that we're waiting for data
         self._pending_data[envelope.correlation_id] = {
@@ -337,10 +462,43 @@ class ResolverService(BaseService):
             "expected_responses": len(intent.data_queries),
             "received_responses": 0,
             "data": {},
+            "created_at": time.time(),
         }
+
+    def _check_pending_timeouts(self) -> None:
+        """Forward any pending requests that have timed out (10s)."""
+        now = time.time()
+        timed_out = []
+
+        for corr_id, pending in self._pending_data.items():
+            age = now - pending["created_at"]
+            if age > 10:  # 10 second timeout
+                timed_out.append(corr_id)
+
+        for corr_id in timed_out:
+            pending = self._pending_data.pop(corr_id)
+            logger.warning(
+                "Data request timed out after %.1fs (%d/%d responses received). Forwarding with partial data.",
+                time.time() - pending["created_at"],
+                pending["received_responses"],
+                pending["expected_responses"],
+            )
+            original = pending["original_envelope"]
+            intent = pending["intent"]
+            # Add timeout notice to data context
+            data = pending["data"]
+            if pending["received_responses"] < pending["expected_responses"]:
+                data["_timeout_notice"] = {
+                    "status": "partial",
+                    "message": f"Some data sources did not respond in time ({pending['received_responses']}/{pending['expected_responses']} received). Results may be incomplete.",
+                }
+            self._forward_to_ai(original, intent, data_context=data)
 
     def _handle_data_response(self, envelope: MessageEnvelope) -> None:
         """Handle data responses from connectors and forward to AI when complete."""
+        # Check for timed-out requests while we're here
+        self._check_pending_timeouts()
+
         correlation_id = envelope.correlation_id
         pending = self._pending_data.get(correlation_id)
 

@@ -13,6 +13,8 @@
 #   ./bootstrap.sh init     # Phase 1: generate .env, start infra
 #   ./bootstrap.sh vault    # Phase 2: seed Vault, create AppRoles
 #   ./bootstrap.sh status   # Show what's running and configured
+#
+# No local vault CLI needed — all commands run via docker exec.
 # ============================================================
 
 set -euo pipefail
@@ -20,6 +22,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEPLOY_DIR="$SCRIPT_DIR/deploy"
 ENV_FILE="$DEPLOY_DIR/.env"
+VAULT_CONTAINER="neuro-hcvault"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -40,6 +43,12 @@ gen_token() {
     openssl rand -base64 48 | tr -dc 'a-zA-Z0-9' | head -c 64
 }
 
+# Run a vault command inside the container
+v() {
+    docker exec -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN="$VAULT_TOKEN" \
+        "$VAULT_CONTAINER" vault "$@"
+}
+
 # ============================================================
 # PHASE 1: INIT
 # ============================================================
@@ -57,15 +66,11 @@ phase_init() {
     fi
 
     # Generate all passwords
-    local rmq_password
+    local rmq_password pg_root_password pg_iam_password iam_jwt_secret iam_master_token
     rmq_password=$(gen_password 24)
-    local pg_root_password
     pg_root_password=$(gen_password 24)
-    local pg_iam_password
     pg_iam_password=$(gen_password 24)
-    local iam_jwt_secret
     iam_jwt_secret=$(gen_token)
-    local iam_master_token
     iam_master_token=$(gen_token)
 
     # Write seed .env
@@ -122,7 +127,7 @@ ENVFILE
     # Start infrastructure
     header "Starting Infrastructure Containers"
     cd "$DEPLOY_DIR"
-    docker compose up -d rabbitmq vault-db hcvault
+    docker-compose up -d rabbitmq vault-db hcvault
 
     echo ""
     log "Waiting for containers to be healthy..."
@@ -160,7 +165,7 @@ ENVFILE
     i=0
     echo -n "  Vault:     "
     while [ $i -lt $retries ]; do
-        if docker exec neuro-hcvault vault status -format=json 2>/dev/null | grep -q '"initialized":'; then
+        if docker exec "$VAULT_CONTAINER" vault status -format=json 2>/dev/null | grep -q '"initialized":'; then
             echo -e "${GREEN}running${NC}"
             break
         fi
@@ -173,38 +178,36 @@ ENVFILE
     # Check if Vault needs initialization
     echo ""
     local init_status
-    init_status=$(docker exec neuro-hcvault vault status -format=json 2>/dev/null || echo '{}')
+    init_status=$(docker exec "$VAULT_CONTAINER" vault status -format=json 2>/dev/null || echo '{}')
 
     if echo "$init_status" | grep -q '"initialized":false'; then
         header "Vault Initialization Required"
         echo ""
-        echo "  Vault has not been initialized yet. Run:"
+        echo "  Run:"
         echo ""
-        echo "    docker exec -it neuro-hcvault vault operator init"
+        echo "    docker exec -it $VAULT_CONTAINER vault operator init"
         echo ""
         echo "  SAVE the 5 unseal keys and root token!"
         echo "  Then unseal with 3 of the 5 keys:"
         echo ""
-        echo "    docker exec -it neuro-hcvault vault operator unseal"
-        echo "    docker exec -it neuro-hcvault vault operator unseal"
-        echo "    docker exec -it neuro-hcvault vault operator unseal"
+        echo "    docker exec -it $VAULT_CONTAINER vault operator unseal"
+        echo "    docker exec -it $VAULT_CONTAINER vault operator unseal"
+        echo "    docker exec -it $VAULT_CONTAINER vault operator unseal"
         echo ""
         echo "  Then run Phase 2:"
         echo ""
-        echo "    export VAULT_ADDR=http://localhost:8200"
         echo "    export VAULT_TOKEN=<root-token>"
         echo "    ./bootstrap.sh vault"
         echo ""
     elif echo "$init_status" | grep -q '"sealed":true'; then
         header "Vault Is Sealed"
         echo ""
-        echo "  Vault is initialized but sealed. Unseal it:"
+        echo "  Unseal it:"
         echo ""
-        echo "    docker exec -it neuro-hcvault vault operator unseal  # 3x"
+        echo "    docker exec -it $VAULT_CONTAINER vault operator unseal  # 3x"
         echo ""
         echo "  Then run Phase 2:"
         echo ""
-        echo "    export VAULT_ADDR=http://localhost:8200"
         echo "    export VAULT_TOKEN=<root-token>"
         echo "    ./bootstrap.sh vault"
         echo ""
@@ -213,7 +216,6 @@ ENVFILE
         echo "  Vault appears initialized and unsealed."
         echo "  Run Phase 2:"
         echo ""
-        echo "    export VAULT_ADDR=http://localhost:8200"
         echo "    export VAULT_TOKEN=<root-token>"
         echo "    ./bootstrap.sh vault"
         echo ""
@@ -228,9 +230,6 @@ phase_vault() {
     header "Phase 2: Configure HashiCorp Vault"
 
     # Preflight
-    if [ -z "${VAULT_ADDR:-}" ]; then
-        err "VAULT_ADDR not set. Run: export VAULT_ADDR=http://localhost:8200"
-    fi
     if [ -z "${VAULT_TOKEN:-}" ]; then
         err "VAULT_TOKEN not set. Run: export VAULT_TOKEN=<root-token>"
     fi
@@ -238,19 +237,25 @@ phase_vault() {
         err "deploy/.env not found. Run './bootstrap.sh init' first."
     fi
 
-    vault status > /dev/null 2>&1 || err "Cannot connect to Vault at $VAULT_ADDR"
-    log "Connected to Vault at $VAULT_ADDR"
+    # Test connectivity via docker exec
+    docker exec "$VAULT_CONTAINER" vault status > /dev/null 2>&1 \
+        || err "Vault container '$VAULT_CONTAINER' not running or not unsealed"
+    v status > /dev/null 2>&1 \
+        || err "Cannot authenticate to Vault. Is your VAULT_TOKEN correct?"
+    log "Connected to Vault via docker exec"
 
     # Read existing passwords from .env
+    set -a
     source "$ENV_FILE"
+    set +a
 
     # ── Enable secrets engine ───────────────────────────────
 
     header "Secrets Engine"
-    if vault secrets list -format=json | grep -q '"neuro-secrets/"'; then
+    if v secrets list -format=json 2>/dev/null | grep -q '"neuro-secrets/"'; then
         log "KV v2 engine already enabled"
     else
-        vault secrets enable -path=neuro-secrets kv-v2
+        v secrets enable -path=neuro-secrets kv-v2
         log "Enabled KV v2 at neuro-secrets/"
     fi
 
@@ -258,7 +263,7 @@ phase_vault() {
 
     header "Seeding Secrets"
 
-    vault kv put neuro-secrets/rabbitmq \
+    v kv put neuro-secrets/rabbitmq \
         host="rabbitmq" \
         port="5672" \
         username="${RABBITMQ_USERNAME}" \
@@ -266,7 +271,7 @@ phase_vault() {
         vhost="${RABBITMQ_VHOST}"
     log "neuro-secrets/rabbitmq"
 
-    vault kv put neuro-secrets/postgres \
+    v kv put neuro-secrets/postgres \
         host="vault-db" \
         port="5432" \
         db="neuro_vault" \
@@ -276,19 +281,19 @@ phase_vault() {
         iam_password="${VAULT_IAM_DB_PASSWORD}"
     log "neuro-secrets/postgres"
 
-    vault kv put neuro-secrets/vault-iam \
+    v kv put neuro-secrets/vault-iam \
         jwt_secret="${VAULT_IAM_JWT_SECRET}" \
         master_service_token="${VAULT_IAM_MASTER_SERVICE_TOKEN}"
     log "neuro-secrets/vault-iam"
 
     # Anthropic
     local anthropic_key="${NEURO_ANTHROPIC_API_KEY:-PLACEHOLDER}"
-    vault kv put neuro-secrets/anthropic \
+    v kv put neuro-secrets/anthropic \
         api_key="$anthropic_key" \
         default_model="claude-sonnet-4-5-20250929" \
         max_tokens="4096"
     if [ "$anthropic_key" = "PLACEHOLDER" ]; then
-        warn "neuro-secrets/anthropic (PLACEHOLDER — set NEURO_ANTHROPIC_API_KEY or update manually)"
+        warn "neuro-secrets/anthropic (PLACEHOLDER — export NEURO_ANTHROPIC_API_KEY or update manually)"
     else
         log "neuro-secrets/anthropic"
     fi
@@ -297,7 +302,7 @@ phase_vault() {
     local entra_tenant="${NEURO_ENTRAID_TENANT_ID:-PLACEHOLDER}"
     local entra_client="${NEURO_ENTRAID_CLIENT_ID:-PLACEHOLDER}"
     local entra_secret="${NEURO_ENTRAID_CLIENT_SECRET:-PLACEHOLDER}"
-    vault kv put neuro-secrets/microsoft-graph \
+    v kv put neuro-secrets/microsoft-graph \
         tenant_id="$entra_tenant" \
         client_id="$entra_client" \
         client_secret="$entra_secret"
@@ -310,7 +315,7 @@ phase_vault() {
     # Slack
     local slack_user="${NEURO_SLACK_USER_TOKEN:-PLACEHOLDER}"
     local slack_app="${NEURO_SLACK_APP_TOKEN:-PLACEHOLDER}"
-    vault kv put neuro-secrets/slack \
+    v kv put neuro-secrets/slack \
         user_token="$slack_user" \
         app_level_token="$slack_app"
     if [ "$slack_user" = "PLACEHOLDER" ]; then
@@ -323,56 +328,52 @@ phase_vault() {
 
     header "Creating Policies"
 
-    vault policy write vault-iam - <<'POLICY'
-path "neuro-secrets/data/rabbitmq" { capabilities = ["read"] }
+    write_policy() {
+        local name="$1"
+        local hcl="$2"
+        docker exec -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN="$VAULT_TOKEN" \
+            "$VAULT_CONTAINER" sh -c "echo '$hcl' > /tmp/$name.hcl && vault policy write $name /tmp/$name.hcl && rm /tmp/$name.hcl"
+        log "$name"
+    }
+
+    write_policy "vault-iam" \
+'path "neuro-secrets/data/rabbitmq" { capabilities = ["read"] }
 path "neuro-secrets/data/postgres" { capabilities = ["read"] }
 path "neuro-secrets/data/vault-iam" { capabilities = ["read"] }
+path "neuro-secrets/data/microsoft-graph" { capabilities = ["read"] }'
+
+    write_policy "resolver" \
+'path "neuro-secrets/data/rabbitmq" { capabilities = ["read"] }
+path "neuro-secrets/data/vault-iam" { capabilities = ["read"] }'
+
+    write_policy "connector-entraid" \
+'path "neuro-secrets/data/rabbitmq" { capabilities = ["read"] }
 path "neuro-secrets/data/microsoft-graph" { capabilities = ["read"] }
-POLICY
-    log "vault-iam"
+path "neuro-secrets/data/vault-iam" { capabilities = ["read"] }'
 
-    vault policy write resolver - <<'POLICY'
-path "neuro-secrets/data/rabbitmq" { capabilities = ["read"] }
-path "neuro-secrets/data/vault-iam" { capabilities = ["read"] }
-POLICY
-    log "resolver"
-
-    vault policy write connector-entraid - <<'POLICY'
-path "neuro-secrets/data/rabbitmq" { capabilities = ["read"] }
-path "neuro-secrets/data/microsoft-graph" { capabilities = ["read"] }
-path "neuro-secrets/data/vault-iam" { capabilities = ["read"] }
-POLICY
-    log "connector-entraid"
-
-    vault policy write connector-slack - <<'POLICY'
-path "neuro-secrets/data/rabbitmq" { capabilities = ["read"] }
+    write_policy "connector-slack" \
+'path "neuro-secrets/data/rabbitmq" { capabilities = ["read"] }
 path "neuro-secrets/data/slack" { capabilities = ["read"] }
-path "neuro-secrets/data/vault-iam" { capabilities = ["read"] }
-POLICY
-    log "connector-slack"
+path "neuro-secrets/data/vault-iam" { capabilities = ["read"] }'
 
-    vault policy write connector-wazuh - <<'POLICY'
-path "neuro-secrets/data/rabbitmq" { capabilities = ["read"] }
+    write_policy "connector-wazuh" \
+'path "neuro-secrets/data/rabbitmq" { capabilities = ["read"] }
 path "neuro-secrets/data/wazuh" { capabilities = ["read"] }
-path "neuro-secrets/data/vault-iam" { capabilities = ["read"] }
-POLICY
-    log "connector-wazuh"
+path "neuro-secrets/data/vault-iam" { capabilities = ["read"] }'
 
-    vault policy write agent-worker-claude - <<'POLICY'
-path "neuro-secrets/data/rabbitmq" { capabilities = ["read"] }
+    write_policy "agent-worker-claude" \
+'path "neuro-secrets/data/rabbitmq" { capabilities = ["read"] }
 path "neuro-secrets/data/anthropic" { capabilities = ["read"] }
-path "neuro-secrets/data/vault-iam" { capabilities = ["read"] }
-POLICY
-    log "agent-worker-claude"
+path "neuro-secrets/data/vault-iam" { capabilities = ["read"] }'
 
     # ── AppRoles ────────────────────────────────────────────
 
     header "Creating AppRoles"
 
-    if vault auth list -format=json | grep -q '"approle/"'; then
+    if v auth list -format=json 2>/dev/null | grep -q '"approle/"'; then
         log "AppRole auth already enabled"
     else
-        vault auth enable approle
+        v auth enable approle
         log "Enabled AppRole auth"
     fi
 
@@ -383,15 +384,15 @@ POLICY
         local name="$1"
         local policy="$2"
 
-        vault write "auth/approle/role/$name" \
+        v write "auth/approle/role/$name" \
             token_policies="$policy" \
             token_ttl=1h \
             token_max_ttl=4h \
             secret_id_ttl=0 \
             secret_id_num_uses=0
 
-        ROLE_IDS[$name]=$(vault read -field=role_id "auth/approle/role/$name/role-id")
-        SECRET_IDS[$name]=$(vault write -field=secret_id -f "auth/approle/role/$name/secret-id")
+        ROLE_IDS[$name]=$(v read -field=role_id "auth/approle/role/$name/role-id")
+        SECRET_IDS[$name]=$(v write -field=secret_id -f "auth/approle/role/$name/secret-id")
 
         log "$name (role_id: ${ROLE_IDS[$name]:0:8}...)"
     }
@@ -407,7 +408,6 @@ POLICY
 
     header "Updating deploy/.env"
 
-    # Use sed to fill in the AppRole placeholders
     sed -i "s|^VAULT_IAM_ROLE_ID=.*|VAULT_IAM_ROLE_ID=${ROLE_IDS[vault-iam]}|" "$ENV_FILE"
     sed -i "s|^VAULT_IAM_SECRET_ID=.*|VAULT_IAM_SECRET_ID=${SECRET_IDS[vault-iam]}|" "$ENV_FILE"
     sed -i "s|^RESOLVER_ROLE_ID=.*|RESOLVER_ROLE_ID=${ROLE_IDS[resolver]}|" "$ENV_FILE"
@@ -440,10 +440,12 @@ POLICY
     echo ""
     echo "  AppRoles: 6 created, credentials in deploy/.env"
     echo ""
-    echo "  To update placeholders:"
-    echo "    vault kv put neuro-secrets/anthropic api_key=\"sk-ant-...\" default_model=\"claude-sonnet-4-5-20250929\" max_tokens=\"4096\""
+    echo "  To update placeholders later:"
+    echo "    export VAULT_TOKEN=<root-token>"
+    echo "    docker exec -e VAULT_TOKEN=\$VAULT_TOKEN $VAULT_CONTAINER \\"
+    echo "      vault kv put neuro-secrets/anthropic api_key=\"sk-ant-...\" default_model=\"claude-sonnet-4-5-20250929\" max_tokens=\"4096\""
     echo ""
-    echo "  Next: cd deploy && docker compose up -d"
+    echo "  Next: cd deploy && docker-compose up -d"
     echo ""
 }
 
@@ -473,22 +475,18 @@ phase_status() {
         approle_count=$(grep -c "ROLE_ID=.\+" "$ENV_FILE" 2>/dev/null || echo "0")
         echo "  deploy/.env: exists ($approle_count AppRole IDs configured)"
     else
-        echo "  deploy/.env: not found"
+        echo "  deploy/.env: not found — run ./bootstrap.sh init"
     fi
 
     echo ""
-    if [ -n "${VAULT_ADDR:-}" ]; then
-        echo "  Vault ($VAULT_ADDR):"
-        vault status -format=json 2>/dev/null | python3 -c "
+    echo "  Vault:"
+    docker exec "$VAULT_CONTAINER" vault status -format=json 2>/dev/null | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
 print(f'    Initialized: {d.get(\"initialized\",\"?\")}')
 print(f'    Sealed:      {d.get(\"sealed\",\"?\")}')
 print(f'    Version:     {d.get(\"version\",\"?\")}')
-" 2>/dev/null || echo "    Cannot connect"
-    else
-        echo "  Vault: VAULT_ADDR not set"
-    fi
+" 2>/dev/null || echo "    Container not running"
     echo ""
 }
 

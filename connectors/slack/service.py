@@ -17,6 +17,7 @@ The agent:
 
 import json
 import logging
+import queue
 import re
 import threading
 import time
@@ -61,6 +62,10 @@ class SlackConnector(BaseService):
 
         # Configuration
         self._trigger_config = TriggerConfig()
+
+        # Thread-safe queue for passing messages from Socket Mode thread
+        # to the main RabbitMQ thread (pika is not thread-safe)
+        self._outbound_queue: queue.Queue = queue.Queue()
 
     def on_startup(self) -> None:
         """Initialize Slack clients with user token from HashiCorp Vault."""
@@ -158,8 +163,38 @@ class SlackConnector(BaseService):
             )
             socket_thread.start()
 
-            # Block on RabbitMQ consumption in main thread
-            self.rmq.start_consuming()
+            # Main loop: process RabbitMQ events AND drain outbound queue
+            # pika is NOT thread-safe, so we must publish from the main thread
+            logger.info("Starting main event loop (RabbitMQ + outbound queue)")
+            while self._running:
+                # Process any pending RabbitMQ inbound messages (non-blocking)
+                try:
+                    self.rmq._connection.process_data_events(time_limit=0.1)
+                except Exception as e:
+                    if self._running:
+                        logger.error("RabbitMQ event processing error: %s", e)
+                        break
+
+                # Drain the outbound queue — process events from Socket Mode thread
+                while not self._outbound_queue.empty():
+                    try:
+                        item_type, item_data = self._outbound_queue.get_nowait()
+
+                        if item_type == "slack_event":
+                            # Process inbound Slack message on main thread
+                            # (safe to use RabbitMQ here)
+                            self._process_inbound(**item_data)
+                        elif item_type == "publish":
+                            # Direct publish request
+                            routing_key, envelope = item_data
+                            self.rmq.publish(routing_key, envelope)
+                        else:
+                            logger.warning("Unknown queue item type: %s", item_type)
+
+                    except queue.Empty:
+                        break
+                    except Exception as e:
+                        logger.error("Failed to process queued item: %s", e, exc_info=True)
 
         except KeyboardInterrupt:
             logger.info("Keyboard interrupt received")
@@ -208,7 +243,7 @@ class SlackConnector(BaseService):
         self._socket_client.socket_mode_request_listeners.append(_event_handler)
 
     def _handle_message_event(self, event: Dict[str, Any]) -> None:
-        """Handle incoming Slack messages."""
+        """Handle incoming Slack messages — queue for main thread processing."""
         # Ignore our own messages
         if event.get("user") == self._bot_user_id:
             return
@@ -241,33 +276,54 @@ class SlackConnector(BaseService):
             user_id, channel, trigger.reason,
         )
 
-        # Process the message
-        self._process_inbound(
-            text=text,
-            channel=channel,
-            user_id=user_id,
-            thread_ts=thread_ts or message_ts,
-            message_ts=message_ts,
-            trigger_reason=trigger.reason,
-        )
+        # Acknowledge receipt with eyes reaction (Slack API is thread-safe)
+        try:
+            self._web_client.reactions_add(
+                channel=channel,
+                name="eyes",
+                timestamp=message_ts,
+            )
+        except Exception:
+            pass
+
+        # Queue raw event for main thread processing
+        # Main thread will: resolve identity, build envelope, publish, audit
+        self._outbound_queue.put(("slack_event", {
+            "text": text,
+            "channel": channel,
+            "user_id": user_id,
+            "thread_ts": thread_ts or message_ts,
+            "message_ts": message_ts,
+            "trigger_reason": trigger.reason,
+        }))
 
     def _handle_mention_event(self, event: Dict[str, Any]) -> None:
-        """Handle @mentions — always respond to these."""
+        """Handle @mentions — queue for main thread processing."""
         if event.get("user") == self._bot_user_id:
             return
 
         text = event.get("text", "")
-        # Strip the mention from the text
         text = re.sub(rf"<@{self._bot_user_id}>", "", text).strip()
+        message_ts = event.get("ts", "")
+        channel = event.get("channel", "")
 
-        self._process_inbound(
-            text=text,
-            channel=event.get("channel", ""),
-            user_id=event.get("user", ""),
-            thread_ts=event.get("thread_ts") or event.get("ts", ""),
-            message_ts=event.get("ts", ""),
-            trigger_reason="direct_mention",
-        )
+        try:
+            self._web_client.reactions_add(
+                channel=channel,
+                name="eyes",
+                timestamp=message_ts,
+            )
+        except Exception:
+            pass
+
+        self._outbound_queue.put(("slack_event", {
+            "text": text,
+            "channel": channel,
+            "user_id": event.get("user", ""),
+            "thread_ts": event.get("thread_ts") or message_ts,
+            "message_ts": message_ts,
+            "trigger_reason": "direct_mention",
+        }))
 
     def _handle_reaction_event(self, event: Dict[str, Any]) -> None:
         """Handle emoji reactions — can be used as triggers."""
@@ -349,21 +405,11 @@ class SlackConnector(BaseService):
         trigger_reason: str,
     ) -> None:
         """
-        Process an inbound Slack message:
-        1. Show typing / acknowledge with reaction
-        2. Resolve user identity via Vault-IAM
-        3. Build envelope and publish to Neuro-Network
-        4. Track for response routing
+        Process an inbound Slack message (called from main thread):
+        1. Resolve user identity via Vault-IAM
+        2. Build envelope and publish to Neuro-Network
+        3. Track for response routing
         """
-        # Acknowledge receipt with a reaction (eyes emoji = "I see you")
-        try:
-            self._web_client.reactions_add(
-                channel=channel,
-                name="eyes",
-                timestamp=message_ts,
-            )
-        except Exception:
-            pass  # Non-critical
 
         # Resolve Slack user to canonical identity
         try:
@@ -373,8 +419,10 @@ class SlackConnector(BaseService):
             )
         except Exception as e:
             logger.warning("Could not resolve identity for %s: %s", user_id, e)
-            # Fallback: get basic info from Slack
-            identity = self._get_slack_user_info(user_id)
+            # Fallback: try to auto-match by email from Slack profile
+            identity = self._auto_match_identity(user_id)
+            if not identity:
+                identity = self._get_slack_user_info(user_id)
 
         # Build the message envelope
         actor = ActorContext(
@@ -406,10 +454,13 @@ class SlackConnector(BaseService):
         )
 
         # Track this message for response routing
+        # For DMs, don't use threading — reply directly in conversation
+        reply_thread_ts = None if trigger_reason == "direct_message" else thread_ts
+
         with self._pending_lock:
             self._pending_responses[envelope.correlation_id] = {
                 "channel": channel,
-                "thread_ts": thread_ts,
+                "thread_ts": reply_thread_ts,
                 "message_ts": message_ts,
                 "user_id": user_id,
                 "timestamp": time.time(),
@@ -423,8 +474,9 @@ class SlackConnector(BaseService):
                 "correlation_id": envelope.correlation_id,
             }
 
-        # Publish to the Neuro-Network
+        # Publish to the Neuro-Network (safe — running on main thread)
         self.rmq.publish("user.query", envelope)
+        logger.info("Published message: %s", envelope.correlation_id)
 
         # Audit the inbound message
         self.audit.log_from_envelope(
@@ -548,23 +600,37 @@ class SlackConnector(BaseService):
         thread_ts: str,
         limit: int = 10,
     ) -> List[Dict[str, str]]:
-        """Fetch recent thread history for conversation context."""
+        """Fetch recent conversation history for context."""
         try:
-            result = self._web_client.conversations_replies(
-                channel=channel,
-                ts=thread_ts,
-                limit=limit,
-            )
+            if thread_ts:
+                # Threaded conversation — get replies
+                result = self._web_client.conversations_replies(
+                    channel=channel,
+                    ts=thread_ts,
+                    limit=limit,
+                )
+                raw_messages = result.get("messages", [])[:-1]  # Exclude current
+            else:
+                # DM or unthreaded — get recent channel history
+                result = self._web_client.conversations_history(
+                    channel=channel,
+                    limit=limit + 1,  # +1 because current message is included
+                )
+                raw_messages = result.get("messages", [])[1:]  # Exclude current (first = newest)
+                raw_messages.reverse()  # Chronological order
+
             messages = []
-            for msg in result.get("messages", [])[:-1]:  # Exclude the current message
+            for msg in raw_messages:
+                # Skip bot messages that aren't Kevin, and skip system messages
+                if msg.get("subtype"):
+                    continue
                 role = "assistant" if msg.get("user") == self._bot_user_id else "user"
-                messages.append({
-                    "role": role,
-                    "content": msg.get("text", ""),
-                })
+                text = msg.get("text", "").strip()
+                if text:
+                    messages.append({"role": role, "content": text})
             return messages
         except Exception as e:
-            logger.debug("Could not fetch thread history: %s", e)
+            logger.debug("Could not fetch conversation history: %s", e)
             return []
 
     def _get_slack_user_info(self, user_id: str) -> Dict[str, Any]:
@@ -592,6 +658,90 @@ class SlackConnector(BaseService):
                 "roles": [],
                 "groups": [],
             }
+
+    def _auto_match_identity(self, slack_user_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Auto-match a Slack user to a NeuroNet identity by email.
+
+        1. Get the user's email from their Slack profile
+        2. Look up that email in Vault-IAM
+        3. If found, create a Slack identity mapping so future lookups are instant
+        4. Return the full identity with roles
+        """
+        try:
+            # Get email from Slack profile
+            result = self._web_client.users_info(user=slack_user_id)
+            user = result.get("user", {})
+            profile = user.get("profile", {})
+            email = profile.get("email")
+
+            if not email:
+                logger.debug("No email in Slack profile for %s", slack_user_id)
+                return None
+
+            logger.info("Attempting auto-match for %s via email %s", slack_user_id, email)
+
+            # Ask Vault-IAM to resolve by email and create the mapping
+            try:
+                identity = self.iam.resolve_by_email(email)
+            except AttributeError:
+                # If resolve_by_email doesn't exist, try the admin endpoint
+                identity = self._resolve_and_map_by_email(email, slack_user_id)
+
+            if identity:
+                logger.info(
+                    "Auto-matched Slack user %s → %s (%s) with roles %s",
+                    slack_user_id,
+                    identity.get("display_name"),
+                    identity.get("email"),
+                    identity.get("roles", []),
+                )
+                return identity
+
+            logger.info("No matching NeuroNet user for email %s", email)
+            return None
+
+        except Exception as e:
+            logger.warning("Auto-match failed for %s: %s", slack_user_id, e)
+            return None
+
+    def _resolve_and_map_by_email(
+        self, email: str, slack_user_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Look up a user by email via Vault-IAM, create the Slack
+        identity mapping, then resolve normally.
+        """
+        try:
+            # Step 1: Resolve by email (Vault-IAM supports provider=email)
+            identity = self.iam.resolve_identity(
+                provider="email",
+                external_id=email,
+            )
+
+            user_id = identity.get("user_id")
+            if not user_id:
+                return None
+
+            # Step 2: Create the Slack→user mapping via admin endpoint
+            self.iam._request("POST", "/api/v1/admin/identity-mappings", json={
+                "provider": "slack",
+                "external_id": slack_user_id,
+                "user_id": user_id,
+                "verified": True,
+            })
+
+            logger.info(
+                "Auto-mapped Slack %s → %s (%s)",
+                slack_user_id, identity.get("display_name"), email,
+            )
+
+            # Return the identity we already have (includes roles/groups)
+            return identity
+
+        except Exception as e:
+            logger.debug("Auto-map by email failed: %s", e)
+            return None
 
     def _chunk_message(self, text: str, max_length: int) -> List[str]:
         """Split a long message into chunks at paragraph boundaries."""
