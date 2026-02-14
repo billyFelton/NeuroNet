@@ -99,7 +99,130 @@
 - [ ] Each agent gets its own Slack bot identity, RBAC scope, Vault policy, and knowledge base
 - [ ] Shared infrastructure (RabbitMQ, Vault, PostgreSQL) with isolated data per agent
 
-### Multi-Model Support
+### Agent Service Modes (Trust Levels)
+
+Each agent progresses through trust levels as it proves reliability in the environment. Admins promote/demote agents via Conductor. Mode is enforced at the Resolver level before any action is dispatched.
+
+- [ ] **Mode 1 — Observer (Read-Only)**
+  - Agent can only read and analyze data — no write actions of any kind
+  - Queries: alerts, logs, user profiles, dashboards, reports
+  - Messaging: can respond in Slack/Teams conversations
+  - Purpose: learn the environment, people, procedures, naming conventions, normal baselines
+  - All agents start here on initial deployment
+  - Builds knowledge base organically from interactions and scheduled data sweeps
+  - Conductor shows "learning progress" — how many users interacted, topics covered, data sources explored
+
+- [ ] **Mode 2 — Assisted (Human-in-the-Loop)**
+  - Agent can propose write actions but every action requires human approval before execution
+  - Proposals appear in a dedicated Slack channel or Conductor approval queue
+  - Approval flow: Agent proposes → notification to approver(s) → approve/deny/modify → execute or cancel
+  - Approved actions: disable account, revoke sessions, create ticket, send alert email, modify firewall rule, etc.
+  - Messaging is unrestricted (no approval needed to respond in chat or send routine notifications)
+  - Scheduled tasks can generate reports but proposed remediations require approval
+  - Audit trail tracks: who approved, when, original proposal vs. what was executed
+  - Timeout: if no approval within configurable window (e.g., 1 hour), action expires with notification
+
+- [ ] **Mode 3 — Autonomous (Supervised)**
+  - Agent can execute certain pre-approved action categories without human approval
+  - Admin configures which actions are auto-approved vs. still require review per agent:
+    - **Auto-approved examples:** send notification emails, create low-priority tickets, block known-malicious IPs, force password reset on compromised accounts
+    - **Still requires approval:** disable user accounts, modify security policies, access sensitive mailboxes, make financial transactions, deploy code changes
+  - High-severity or unusual actions still routed to approval queue (anomaly detection on agent behavior)
+  - All autonomous actions logged with full audit trail and rollback capability where possible
+  - Conductor dashboard shows: actions taken autonomously vs. approved vs. denied, with success/failure rates
+
+- [ ] **Mode 4 — Trusted (Full Autonomy)**
+  - Reserved for mature agents with proven track record
+  - All actions within the agent's RBAC scope are auto-executed
+  - Emergency brake: admin can instantly demote any agent back to Observer from Conductor
+  - Anomaly detection: if agent behavior deviates significantly from baseline (e.g., sudden spike in account disables), auto-demote to Assisted and alert admins
+  - Periodic review: Conductor prompts admins to review Trusted agents quarterly
+
+- [ ] **Mode transitions:**
+  - Promotion requires admin approval in Conductor with justification
+  - Demotion can be instant (emergency) or scheduled
+  - Mode history tracked in audit log
+  - Conductor recommends promotion when metrics indicate readiness (e.g., "Kevin has been in Observer for 30 days with 500+ interactions and zero hallucination incidents — consider promoting to Assisted")
+  - Automatic demotion triggers: hallucination detected, unauthorized action attempt, error rate spike, admin override
+
+- [ ] **Resolver enforcement:**
+  - Resolver checks agent mode before dispatching any write action
+  - Observer: block all write routing keys, return "I can analyze this but can't take action yet — I'm currently in observation mode"
+  - Assisted: route write actions to approval queue instead of directly to connector
+  - Autonomous: check action against auto-approved list, route accordingly
+  - Trusted: route directly to connector
+
+### Agent Learning, Training & Context Retention
+
+Kevin loses conversation context because of three compounding issues. These fixes apply to all agents.
+
+#### Problem 1: Short conversation window
+- Slack connector only sends last 10 messages as history
+- With Kevin's verbose replies + [SYSTEM DATA] blocks, that's ~3-4 conversational turns
+- Once a topic scrolls out of this window, Kevin has zero recall
+
+#### Problem 2: Knowledge extraction is too selective
+- Only extracts from security-related conversations with data context
+- Skips general chitchat and short messages
+- Doesn't extract investigation context ("we were looking at mchen's account")
+- Doesn't store what the user asked Kevin to do or what was discussed
+
+#### Problem 3: Knowledge retrieval is keyword-based
+- Full-text search only matches if exact words overlap
+- No semantic search — "tell me about that risky user" won't match a stored fact about mchen
+- No awareness of active investigations or ongoing conversations
+
+#### Fixes — Conversation Context
+
+- [ ] **Conversation summary table** — New `knowledge.conversations` table that stores a running summary per user per session. After every exchange, use Haiku to update a 200-word summary of "what we've been discussing." Inject this as context on every message.
+  ```sql
+  CREATE TABLE knowledge.conversations (
+    id SERIAL PRIMARY KEY,
+    user_email VARCHAR(255) NOT NULL,
+    agent_id VARCHAR(100) NOT NULL,
+    channel_id VARCHAR(100),
+    summary TEXT,           -- Rolling summary of conversation
+    key_entities TEXT[],    -- Users, hosts, IPs mentioned
+    open_questions TEXT[],  -- Things user asked that aren't resolved
+    last_action TEXT,       -- Last thing Kevin did or recommended
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ  -- Auto-expire after 24h of inactivity
+  );
+  ```
+
+- [ ] **Increase DM history to 20-30 messages** — More turns in the sliding window. Balance against token cost.
+
+- [ ] **Smart history compression** — Instead of raw messages, use Haiku to compress older messages into a summary. Send: [summary of earlier conversation] + [last 10 raw messages]. This gives Kevin awareness of the full conversation without blowing up the context window.
+
+- [ ] **Session continuity** — Track "active session" per user. If a user messages Kevin within 30 minutes of their last message, treat it as the same conversation and inject the conversation summary. After 30 min gap, start fresh but still have access to knowledge base.
+
+#### Fixes — Knowledge Extraction
+
+- [ ] **Extract from ALL conversations** — Remove the filter that skips general/short messages. Every interaction may contain useful context.
+- [ ] **Extract investigation state** — When Kevin is investigating something (risky user, alert, incident), store the investigation context: who, what, current findings, next steps, user's instructions.
+- [ ] **Extract user preferences** — How they like reports formatted, what they care about, their team, their responsibilities.
+- [ ] **Extract decisions and outcomes** — "Billy decided to disable mchen's account" — important to remember.
+- [ ] **Deduplication** — Current `ON CONFLICT DO NOTHING` means facts never update. Switch to upsert that merges/updates existing facts with new info.
+- [ ] **Confidence scoring** — Facts from explicit "remember this" get high confidence. Facts extracted implicitly start lower and increase with repeated references.
+
+#### Fixes — Knowledge Retrieval
+
+- [ ] **Semantic search (embeddings)** — Add a vector column to `knowledge.entries`. Use an embedding model (Anthropic voyage, OpenAI ada, or local) to embed facts. Retrieve by cosine similarity instead of keyword match. This lets "that risky user we discussed" find the mchen entry.
+- [ ] **Active investigation context** — Always inject any open/active investigation entries for the current user, regardless of keyword match.
+- [ ] **User-specific context** — Always inject facts tagged with the current user's email (their preferences, past questions, their team).
+- [ ] **Recency boost** — Recently stored facts get retrieval priority over old ones.
+
+#### Fixes — Training & Onboarding
+
+- [ ] **Environment learning mode** — When agent is in Observer mode, schedule regular data sweeps that build the knowledge base:
+  - Crawl EntraID for org structure, departments, managers
+  - Crawl Wazuh for host inventory, network topology, normal alert baselines
+  - Index email distribution lists and key contacts
+  - Store naming conventions, IP ranges, server roles
+- [ ] **Admin-provided context** — Conductor UI for admins to directly add knowledge entries: "Our CFO is Jane Smith", "The finance servers are in the 10.20.x.x range", "We use Jira for ticketing"
+- [ ] **Feedback loop** — When Kevin gets something wrong and the user corrects him, extract the correction as a high-confidence fact. "No, mchen is in Engineering not Finance" → update the stored fact.
+- [ ] **Runbook ingestion** — Upload SOPs, runbooks, incident response plans as documents. Parse and store as structured knowledge entries that Kevin can reference.
+- [ ] **Periodic knowledge review** — Conductor shows all stored knowledge per agent. Admins can verify, correct, or delete entries. Flag low-confidence entries for review.
 
 - [ ] **Model-agnostic worker** — Abstract the AI worker to support multiple LLM providers behind a unified interface
 - [ ] **Anthropic (Claude)** — Currently implemented. Sonnet 4.5 default, Opus 4.6 for premium tasks
