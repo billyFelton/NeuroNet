@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
 LABEL maintainer="neuro-network"
-LABEL description="Resolver: RBAC enforcement and message routing gateway"
+LABEL description="Meraki Dashboard API connector: read-only network visibility"
 
 WORKDIR /app
 
@@ -16,7 +16,10 @@ RUN pip install --no-cache-dir \
 
 COPY service.py .
 
-ENV NEURO_SERVICE_NAME=resolver
+ENV NEURO_SERVICE_NAME=connector-meraki
 ENV NEURO_SERVICE_VERSION=0.1.0
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
 
 CMD ["python", "service.py"]

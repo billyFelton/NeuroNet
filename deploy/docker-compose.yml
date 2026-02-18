@@ -307,6 +307,99 @@ services:
     networks:
       - neuro-network
 
+  connector-zendesk:
+    build:
+      context: ../connectors/zendesk
+      args:
+        NEUROKIT_VERSION: ${NEUROKIT_VERSION:-v0.2.0}
+    container_name: neuro-connector-zendesk
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      hcvault:
+        condition: service_healthy
+      vault-iam:
+        condition: service_started
+    environment:
+      NEURO_SERVICE_NAME: connector-zendesk
+      NEURO_ENVIRONMENT: ${NEURO_ENVIRONMENT:-development}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-neuro}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/neuro}
+      HCVAULT_URL: http://hcvault:8200
+      HCVAULT_ROLE_ID: ${ZENDESK_CONNECTOR_ROLE_ID:-}
+      HCVAULT_SECRET_ID: ${ZENDESK_CONNECTOR_SECRET_ID:-}
+      VAULT_IAM_URL: http://vault-iam:8080
+      VAULT_IAM_SERVICE_TOKEN: ${VAULT_IAM_MASTER_SERVICE_TOKEN:-}
+    networks:
+      - neuro-network
+
+  connector-powershell:
+    build:
+      context: ../connectors/powershell
+      args:
+        NEUROKIT_VERSION: ${NEUROKIT_VERSION:-v0.2.0}
+    container_name: neuro-connector-powershell
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      hcvault:
+        condition: service_healthy
+      vault-iam:
+        condition: service_started
+      vault-db:
+        condition: service_healthy
+    environment:
+      NEURO_SERVICE_NAME: connector-powershell
+      NEURO_ENVIRONMENT: ${NEURO_ENVIRONMENT:-development}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-neuro}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/neuro}
+      HCVAULT_URL: http://hcvault:8200
+      HCVAULT_ROLE_ID: ${POWERSHELL_CONNECTOR_ROLE_ID:-}
+      HCVAULT_SECRET_ID: ${POWERSHELL_CONNECTOR_SECRET_ID:-}
+      VAULT_IAM_URL: http://vault-iam:8080
+      VAULT_IAM_SERVICE_TOKEN: ${VAULT_IAM_MASTER_SERVICE_TOKEN:-}
+      KB_DB_HOST: vault-db
+      KB_DB_USER: vault_iam
+      KB_DB_PASSWORD: ${VAULT_IAM_DB_PASSWORD}
+      KB_DB_NAME: neuro_vault
+    networks:
+      - neuro-network
+
+  connector-meraki:
+    build:
+      context: ../connectors/meraki
+      args:
+        NEUROKIT_VERSION: ${NEUROKIT_VERSION:-v0.2.0}
+    container_name: neuro-connector-meraki
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      hcvault:
+        condition: service_healthy
+      vault-iam:
+        condition: service_started
+    environment:
+      NEURO_SERVICE_NAME: connector-meraki
+      NEURO_ENVIRONMENT: ${NEURO_ENVIRONMENT:-development}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-neuro}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/neuro}
+      HCVAULT_URL: http://hcvault:8200
+      HCVAULT_ROLE_ID: ${MERAKI_CONNECTOR_ROLE_ID:-}
+      HCVAULT_SECRET_ID: ${MERAKI_CONNECTOR_SECRET_ID:-}
+      VAULT_IAM_URL: http://vault-iam:8080
+      VAULT_IAM_SERVICE_TOKEN: ${VAULT_IAM_MASTER_SERVICE_TOKEN:-}
+    networks:
+      - neuro-network
+
   # ── Scheduler ─────────────────────────────────────────────
 
   scheduler:

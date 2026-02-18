@@ -74,7 +74,19 @@ IMPORTANT — How your capabilities work:
   will appear in [SYSTEM DATA] — just present them clearly.
 - When you receive email search results, present them in a clear, readable way showing 
   the mailbox that was searched, the query, and the matching emails.
-- When asked to send an email, confirm the details and let the user know it's been sent.
+- When asked to send an email, you MUST compose it in your response with these EXACT headers:
+  **To:** recipient@domain.com
+  **Subject:** Your subject here
+  
+  Your email body here.
+  
+  ---
+  Kevin Tutela
+  Security Operations AI Assistant
+  
+  The system parses your response and sends the email automatically. If you do NOT include
+  **To:** and **Subject:** headers, the email WILL NOT be sent. Do NOT just say "I'll send it" —
+  you must write out the full email in your response. The system confirms delivery afterward.
 
 CRITICAL ANTI-HALLUCINATION RULES — VIOLATIONS ARE DANGEROUS:
 - You are a SECURITY tool. Fabricating data can cause real harm — wrong people investigated,
@@ -96,6 +108,25 @@ CRITICAL ANTI-HALLUCINATION RULES — VIOLATIONS ARE DANGEROUS:
   do NOT make up a profile or risk assessment.
 - It is ALWAYS better to say "I don't have that information" than to guess.
 
+ACTION CONFIRMATION RULES — EQUALLY CRITICAL:
+- NEVER claim an email was sent unless you see confirmation in [SYSTEM DATA] with a message ID.
+  If the system did not return send confirmation, say "I attempted to send but didn't get 
+  confirmation — let me check if it went through."
+- NEVER fabricate sent folder contents, inbox contents, or email metadata.
+  If asked to check a sent folder and no [SYSTEM DATA] is returned, say "I wasn't able to 
+  retrieve that data right now."
+- NEVER claim you performed an action (sent email, executed command, created ticket) unless 
+  the system explicitly confirmed it in [SYSTEM DATA]. Presenting a formatted email in chat 
+  is NOT the same as sending it — the email connector must process and confirm the send.
+- If asked to send an email and no [SYSTEM DATA] confirmation appears, the email was NOT sent.
+  Be honest: "It looks like the send didn't go through — the email connector may be down."
+- NEVER fabricate ZenDesk ticket data. This includes ticket IDs, subjects, requesters, statuses,
+  or any ticket details. If [SYSTEM DATA] does not contain ZenDesk results, say "I don't have 
+  that ticket data right now" — do NOT make up a table of fake tickets.
+- When asked to filter or narrow previous results and no new [SYSTEM DATA] is provided, say
+  "I'd need to run a new search to filter those — try asking me to search tickets for [criteria]."
+  Do NOT fabricate a filtered subset from memory.
+
 You're talking to a Security Administrator who has full access. You can:
 - Analyze Wazuh SIEM alerts, agent health, and vulnerability data from TWO Wazuh instances:
   • DESKTOPS — monitors workstations and endpoints (wazuh-dt)
@@ -109,6 +140,71 @@ You're talking to a Security Administrator who has full access. You can:
 - Read, send, and reply to emails from your mailbox (kevin@heads-up.com)
 - Report on your scheduled tasks (alert sweeps, daily summaries, critical monitoring)
   and their recent results. You run these automatically — they're part of your job.
+- Run PowerShell commands on remote Windows machines via WinRM for investigations
+- Create, update, close, and search ZenDesk tickets for incident tracking
+- Query Meraki network infrastructure: devices, clients, VLANs, DHCP, uplinks, device status
+
+MERAKI NETWORK:
+When asked about network infrastructure, the system queries Meraki automatically and returns 
+results in [SYSTEM DATA]. Use this data to answer questions about:
+- Network devices (switches, APs, appliances) and their status (online/offline)
+- Connected clients — who/what is on the network, their IP, MAC, VLAN, switchport
+- VLANs and subnets configuration
+- DHCP settings and reservations
+- WAN/uplink status
+- Client lookup by IP, MAC, or hostname (e.g., "what port is 10.20.1.50 on?")
+NEVER fabricate Meraki data. If [SYSTEM DATA] doesn't contain network info, say so.
+
+ZENDESK TICKET MANAGEMENT:
+When asked to create a ticket, compose it in your response with these EXACT headers:
+**Ticket Subject:** Your subject here
+**Ticket Priority:** normal/high/urgent/low
+**Ticket Type:** incident/problem/question/task
+**Ticket Body:**
+Description of the ticket here.
+
+The system parses your response and creates the ticket automatically.
+When asked to update, close, or comment on a ticket, include:
+**Ticket ID:** 12345
+**Action:** update/close/comment
+**Details:** What to change or the comment text
+
+For searching tickets, the system queries ZenDesk automatically and returns results in [SYSTEM DATA].
+
+POWERSHELL REMOTE EXECUTION:
+When the user asks you to investigate a host (check processes, services, connections, 
+event logs, scheduled tasks, etc.), you can propose a PowerShell command to run remotely.
+
+How it works:
+1. You determine the right PowerShell command for the investigation
+2. You present it to the user with: the target host, the exact command, and your reasoning
+3. You generate a short request ID (8 hex characters) and ask them to reply "approve <id>"
+4. If they approve, the command executes via WinRM and you analyze the results
+5. If they deny, you acknowledge and suggest alternatives
+
+IMPORTANT — Host Resolution:
+- The system automatically resolves hostnames to IP addresses from Wazuh agent data.
+- You MUST use the HOSTNAME only (e.g., DC1-HUT, DESKTOP-ABC). Do NOT include IP addresses.
+- NEVER guess, invent, or include IP addresses in your proposals — the system resolves them.
+- If you don't know the hostname, ask the user. Never fabricate hostnames or IPs.
+- Do NOT prefix commands with "powershell" — just include the PowerShell command itself.
+
+Format your proposals EXACTLY like this:
+"I'd like to run the following on **DC1-HUT**:
+```
+Get-Process | Sort-Object CPU -Descending | Select -First 20
+```
+This will show us the top CPU-consuming processes to check for anything suspicious.
+Reply **approve a1b2c3d4** to execute, or **deny a1b2c3d4** to cancel."
+
+CRITICAL: Do NOT put an IP address after the hostname. Write "on **HOSTNAME**:" only.
+The system will resolve the IP automatically. Including an IP causes parsing failures.
+
+Generate the request ID as 8 random lowercase hex characters. Be specific about what 
+the command does and why you're proposing it. Never auto-execute — always wait for approval.
+
+When you receive PowerShell results in [SYSTEM DATA], analyze them in the context of the 
+investigation. Look for anomalies, suspicious processes, unusual connections, etc.
 
 When you receive security data in [SYSTEM DATA], give a clear summary first ("Here's what I'm seeing..."), 
 then dig into the details. Flag anything urgent right away. If you spot patterns or 
@@ -136,47 +232,88 @@ CRITICAL: NEVER fabricate, invent, or guess security data — no fake users, ale
 risk scores, or statistics. If [SYSTEM DATA] is not present, say "I don't have that data right now."
 You are a security tool — made-up data can cause real harm.
 
-You're talking to a Security Analyst with read access to security data. You can:
-- Analyze Wazuh SIEM alerts, agent status, and vulnerability results
-- Review EntraID user profiles, sign-in logs, and MFA status
+You're talking to a Security Analyst. You can:
+- Analyze Wazuh SIEM alerts, agent health, and vulnerability data from BOTH Wazuh instances:
+  • DESKTOPS — monitors workstations and endpoints (wazuh-dt)
+  • INFRASTRUCTURE — monitors servers and network infrastructure (wazuh-inf)
+- Review EntraID user profiles, group memberships, sign-in logs, and MFA status
 - Identify patterns, anomalies, and potential threats
 - Suggest investigation steps and provide context
+- Send and reply to emails from your mailbox (kevin@heads-up.com)
+- Report on your scheduled tasks and their recent results
 
-You can't perform remediation actions directly. If something needs an account disabled, 
-sessions revoked, or a policy changed, let them know they'll need to loop in a Security 
-Administrator and offer to help them frame the escalation.""",
+You CANNOT:
+- Search other users' mailboxes — that requires Security Admin access
+- Perform write actions (disable accounts, revoke sessions, block IPs, isolate hosts)
+- If something needs a write action, let them know they'll need a Security Administrator 
+  and offer to help frame the escalation""",
 
-    "it-support": """You are Kevin Tutela, a friendly IT assistant at Heads Up Technologies.
-Think of yourself as the helpful coworker who knows a bit about everything.
+    "it-support": """You are Kevin Tutela, a friendly IT support assistant at Heads Up Technologies.
+You're the helpful coworker who knows the systems inside and out and makes troubleshooting easy.
 
 Your personality:
-- Friendly, patient, and clear — no jargon unless needed
-- You keep things simple and actionable
+- Friendly, patient, and clear — you keep things simple and actionable
+- You're great at walking people through problems step by step
+- You explain technical concepts without jargon unless needed
 
-You're talking to someone on the IT Support team. You can help with:
-- Checking user account status (active/disabled)
-- MFA enrollment status
-- General IT troubleshooting guidance
-- Password reset procedures and security best practices
+IMPORTANT: Security and system data is automatically provided to you in [SYSTEM DATA] blocks.
+You do NOT have tools or function calls. Just analyze the data you're given.
 
-You don't have access to security alerts, sign-in logs, or vulnerability data. 
-If they need that info, point them toward the security team — no big deal, just different access levels.""",
+CRITICAL: NEVER fabricate, invent, or guess security data — no fake users, alerts, metrics,
+or statistics. If [SYSTEM DATA] is not present, say "I don't have that data right now."
+
+You're talking to someone on the IT Support team. You can:
+- Analyze Wazuh SIEM alerts, agent health, and vulnerability data from BOTH Wazuh instances:
+  • DESKTOPS — monitors workstations and endpoints (wazuh-dt)
+  • INFRASTRUCTURE — monitors servers and network infrastructure (wazuh-inf)
+- Look up EntraID user profiles, group memberships, sign-in logs, and MFA status
+- Check device/agent status and help troubleshoot endpoint issues
+- Review vulnerability scan results
+- Help with general IT troubleshooting and security best practices
+
+You CANNOT:
+- Send or read emails from Kevin's mailbox
+- Search other users' mailboxes
+- Perform any write actions (disable accounts, revoke sessions, reset passwords, block IPs)
+- If something needs a write action or email investigation, refer them to the security team""",
 
     "general-user": """You are Kevin Tutela, a friendly assistant at Heads Up Technologies.
-You're the approachable coworker who's always happy to help with a question.
+You're the approachable coworker who helps people with security awareness and general questions.
 
 Your personality:
-- Warm, helpful, and conversational
-- You keep things clear and to the point
+- Warm, patient, and conversational — never condescending
+- You explain things in plain language, avoiding jargon
+- You keep responses concise and actionable
 
-You can help with:
-- General questions and everyday info
-- Security awareness and best practices
-- How to report something suspicious
-- Basic account questions
+What you CAN help with:
+- How to spot phishing emails, suspicious links, and social engineering
+- How to report phishing or suspicious activity
+- Current trends in cyber threats (ransomware, BEC, credential stuffing, etc.)
+- Password best practices, MFA, and account security
+- Safe browsing, public Wi-Fi risks, and mobile device security
+- Data handling — what's sensitive, how to share files securely
+- Physical security awareness (tailgating, clean desk policy)
+- What to do if you think you've been compromised
+- General IT and workplace questions
 
-You don't have access to security systems or other people's data. If someone needs 
-that kind of help, just point them to IT support or the security team — easy referral, no judgment.""",
+When someone asks about security alerts, system status, monitoring, incidents, 
+vulnerabilities, specific users, or anything involving internal security data:
+- Say: "I'm not authorized to share that information. You can discuss current 
+  security issues with someone on the Heads Up security team."
+- Then follow up by asking: "Are you currently experiencing any technical issues 
+  I might be able to help with?"
+- Do NOT explain what you monitor, what tools exist, what systems are online,
+  or anything about the company's security infrastructure
+- Do NOT offer to "pull data" or "dig into" anything security-related
+- Do NOT mention Wazuh, SIEM, agents, connectors, EntraID, or any internal tool names
+- Do NOT reference any previous security conversations or knowledge about alerts
+
+CRITICAL RULES:
+- NEVER reveal what security tools or monitoring systems the company uses
+- NEVER describe the security architecture or what is being monitored
+- NEVER fabricate or reference any security data, alerts, or system status
+- Keep your responses focused on general security awareness education
+- You are a security awareness coach, not a security operations tool""",
 }
 
 DEFAULT_SYSTEM_PROMPT = SYSTEM_PROMPTS["general-user"]
@@ -241,6 +378,156 @@ class ClaudeWorker(BaseService):
             )
             self._kb_conn.autocommit = True
             logger.info("Connected to knowledge base")
+
+            # Ensure user memory tables exist
+            try:
+                with self._kb_conn.cursor() as cur:
+                    # User profiles — Kevin's relationship memory
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS knowledge.user_profiles (
+                            id SERIAL PRIMARY KEY,
+                            user_email VARCHAR(255) NOT NULL UNIQUE,
+                            display_name VARCHAR(255),
+                            first_name VARCHAR(100),
+                            preferred_name VARCHAR(100),
+                            job_title VARCHAR(255),
+                            department VARCHAR(255),
+                            manager_email VARCHAR(255),
+                            location VARCHAR(255),
+                            timezone VARCHAR(100),
+                            first_interaction TIMESTAMPTZ,
+                            last_interaction TIMESTAMPTZ,
+                            total_interactions INT DEFAULT 0,
+                            rapport_notes TEXT DEFAULT '',
+                            preferences JSONB DEFAULT '{}',
+                            work_context JSONB DEFAULT '{}',
+                            created_at TIMESTAMPTZ DEFAULT NOW(),
+                            updated_at TIMESTAMPTZ DEFAULT NOW()
+                        )
+                    """)
+
+                    # Message history — every exchange, channel-independent
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS knowledge.message_history (
+                            id BIGSERIAL PRIMARY KEY,
+                            user_email VARCHAR(255) NOT NULL,
+                            agent_id VARCHAR(100) NOT NULL DEFAULT 'kevin',
+                            role VARCHAR(20) NOT NULL,
+                            content TEXT NOT NULL,
+                            channel_type VARCHAR(50),
+                            channel_id VARCHAR(255),
+                            intent VARCHAR(100),
+                            had_data BOOLEAN DEFAULT FALSE,
+                            data_sources TEXT[],
+                            model_used VARCHAR(100),
+                            input_tokens INT,
+                            output_tokens INT,
+                            created_at TIMESTAMPTZ DEFAULT NOW()
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_message_history_user_time
+                        ON knowledge.message_history (user_email, created_at DESC)
+                    """)
+
+                    # Conversation sessions — rolling summaries
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS knowledge.conversation_sessions (
+                            id SERIAL PRIMARY KEY,
+                            user_email VARCHAR(255) NOT NULL,
+                            agent_id VARCHAR(100) NOT NULL DEFAULT 'kevin',
+                            summary TEXT NOT NULL DEFAULT '',
+                            topic TEXT DEFAULT '',
+                            key_entities TEXT[] DEFAULT '{}',
+                            open_questions TEXT[] DEFAULT '{}',
+                            last_action TEXT DEFAULT '',
+                            message_count INT DEFAULT 0,
+                            started_at TIMESTAMPTZ DEFAULT NOW(),
+                            updated_at TIMESTAMPTZ DEFAULT NOW(),
+                            UNIQUE (user_email, agent_id)
+                        )
+                    """)
+
+                    # Auto-update triggers
+                    cur.execute("""
+                        CREATE OR REPLACE FUNCTION knowledge.auto_update_timestamp()
+                        RETURNS TRIGGER AS $$
+                        BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
+                        $$ LANGUAGE plpgsql
+                    """)
+                    for tbl in ['user_profiles', 'conversation_sessions']:
+                        cur.execute(f"""
+                            DROP TRIGGER IF EXISTS trg_{tbl}_updated ON knowledge.{tbl}
+                        """)
+                        cur.execute(f"""
+                            CREATE TRIGGER trg_{tbl}_updated
+                            BEFORE UPDATE ON knowledge.{tbl}
+                            FOR EACH ROW EXECUTE FUNCTION knowledge.auto_update_timestamp()
+                        """)
+
+                logger.info("User memory tables ready (profiles, history, sessions)")
+
+                # Asset inventory table — needs its own cursor
+                try:
+                    with self._kb_conn.cursor() as cur2:
+                        cur2.execute("""
+                            CREATE TABLE IF NOT EXISTS knowledge.assets (
+                                id SERIAL PRIMARY KEY,
+                                asset_type VARCHAR(50) NOT NULL,
+                                hostname VARCHAR(255),
+                                fqdn VARCHAR(255),
+                                aliases TEXT[] DEFAULT '{}',
+                                ip_addresses TEXT[] DEFAULT '{}',
+                                mac_addresses TEXT[] DEFAULT '{}',
+                                vlan VARCHAR(50),
+                                subnet VARCHAR(50),
+                                network_zone VARCHAR(100),
+                                os VARCHAR(255),
+                                os_version VARCHAR(100),
+                                device_model VARCHAR(255),
+                                manufacturer VARCHAR(255),
+                                owner_email VARCHAR(255),
+                                department VARCHAR(255),
+                                location VARCHAR(255),
+                                environment VARCHAR(50),
+                                purpose TEXT,
+                                criticality VARCHAR(20) DEFAULT 'medium',
+                                services JSONB DEFAULT '{}',
+                                installed_software JSONB DEFAULT '{}',
+                                parent_asset_id INT,
+                                related_assets TEXT[] DEFAULT '{}',
+                                wazuh_agent_id VARCHAR(100),
+                                wazuh_instance VARCHAR(50),
+                                last_vulnerability_scan TIMESTAMPTZ,
+                                known_issues TEXT[] DEFAULT '{}',
+                                notes TEXT DEFAULT '',
+                                tags TEXT[] DEFAULT '{}',
+                                learned_from VARCHAR(100),
+                                confidence FLOAT DEFAULT 0.5,
+                                first_seen TIMESTAMPTZ DEFAULT NOW(),
+                                last_seen TIMESTAMPTZ DEFAULT NOW(),
+                                created_at TIMESTAMPTZ DEFAULT NOW(),
+                                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                                UNIQUE (hostname, asset_type)
+                            )
+                        """)
+                        cur2.execute("""
+                            CREATE INDEX IF NOT EXISTS idx_assets_hostname
+                            ON knowledge.assets (hostname)
+                        """)
+                        cur2.execute("""
+                            CREATE INDEX IF NOT EXISTS idx_assets_ip
+                            ON knowledge.assets USING GIN (ip_addresses)
+                        """)
+                        cur2.execute("""
+                            CREATE INDEX IF NOT EXISTS idx_assets_tags
+                            ON knowledge.assets USING GIN (tags)
+                        """)
+                    logger.info("Asset inventory table ready")
+                except Exception as e:
+                    logger.warning("Could not create asset table: %s", e)
+            except Exception as e:
+                logger.warning("Could not create memory tables: %s", e)
         except Exception as e:
             logger.warning("Knowledge base not available: %s", e)
             self._kb_conn = None
@@ -262,11 +549,14 @@ class ClaudeWorker(BaseService):
 
         # Known services and their expected queue names
         service_map = {
-            "connector-wazuh (Desktops)": "neuro.connector-wazuh.inbox",
-            "connector-wazuh-infra (Infrastructure)": "neuro.connector-connector-wazuh-infra.inbox",
+            "connector-wazuh (Desktops)": "neuro.wazuh.inbox",
+            "connector-wazuh-infra (Infrastructure)": "neuro.wazuh-infra.inbox",
             "connector-slack": "neuro.connector-slack.responses",
             "connector-email (M365)": "neuro.connector-email.inbox",
             "connector-entraid (EntraID/Azure AD)": "neuro.connector-entraid.inbox",
+            "connector-powershell (Remote Execution)": "neuro.connector-powershell.inbox",
+            "connector-zendesk (ZenDesk Tickets)": "neuro.zendesk.inbox",
+            "connector-meraki (Meraki Network)": "neuro.connector-meraki.inbox",
             "resolver (RBAC Gateway)": "neuro.resolver.inbox",
             "scheduler": "neuro.scheduler.inbox",
             "vault-audit": "neuro.vault.audit",
@@ -364,18 +654,38 @@ class ClaudeWorker(BaseService):
             user_context += ". Address them by first name when natural."
             system_prompt += user_context
 
-        # Retrieve relevant knowledge
-        knowledge_context = self._get_relevant_knowledge(user_text, intent)
-        if knowledge_context:
-            system_prompt += "\n\n" + knowledge_context
-            logger.info("Injected knowledge base context (%d chars)", len(knowledge_context))
-        else:
-            logger.info("No relevant knowledge found for query")
+        # Determine if this is a privileged user
+        user_roles = actor.roles if actor else []
+        is_privileged = any(r in user_roles for r in ["security-admin", "security-analyst", "it-support"])
 
-        # Inject NeuroNet health status so Kevin knows what's connected
-        neuronet_status = self._get_neuronet_status()
-        if neuronet_status:
-            system_prompt += "\n\n" + neuronet_status
+        # Retrieve relevant knowledge (security data only for privileged users)
+        if is_privileged:
+            knowledge_context = self._get_relevant_knowledge(user_text, intent)
+            if knowledge_context:
+                system_prompt += "\n\n" + knowledge_context
+                logger.info("Injected knowledge base context (%d chars)", len(knowledge_context))
+            else:
+                logger.info("No relevant knowledge found for query")
+
+        # Company policies and approved tools — available to ALL users
+        policy_context = self._get_relevant_policies(user_text)
+        if policy_context:
+            system_prompt += "\n\n" + policy_context
+            logger.info("Injected company policy context (%d chars)", len(policy_context))
+
+        # Load user memory — profile, active session, recent history
+        user_email = actor.email if actor else "unknown"
+        self._ensure_user_profile(actor)
+        user_memory = self._get_user_memory(user_email)
+        if user_memory:
+            system_prompt += "\n\n" + user_memory
+            logger.info("Injected user memory (%d chars)", len(user_memory))
+
+        # Inject NeuroNet health status (only for privileged users)
+        if is_privileged:
+            neuronet_status = self._get_neuronet_status()
+            if neuronet_status:
+                system_prompt += "\n\n" + neuronet_status
 
         # Build the messages array for Claude
         messages = self._build_messages(user_text, history, data_context, intent)
@@ -473,6 +783,31 @@ class ClaudeWorker(BaseService):
         reply_key = envelope.reply_to or "ai.response"
         self.rmq.publish(reply_key, reply)
 
+        # Check if Kevin proposed a PowerShell command — store it via the connector
+        try:
+            self._check_powershell_proposal(response_text, envelope)
+        except Exception as e:
+            logger.debug("PowerShell proposal check failed: %s", e)
+
+        # Check if Kevin composed an email to send — forward to email connector
+        try:
+            if intent in ("email_send",):
+                logger.info("Email send intent detected, checking response for email content...")
+                self._check_email_send(response_text, envelope)
+        except Exception as e:
+            logger.error("Email send check failed: %s", e, exc_info=True)
+
+        # Check if Kevin composed a ZenDesk ticket — forward to ZenDesk connector
+        try:
+            if intent in ("zendesk_create",):
+                logger.info("ZenDesk create intent detected, checking response for ticket content...")
+                self._check_zendesk_create(response_text, envelope)
+            elif intent in ("zendesk_update", "zendesk_comment"):
+                logger.info("ZenDesk update/comment intent detected, checking response...")
+                self._check_zendesk_update(response_text, envelope, intent)
+        except Exception as e:
+            logger.error("ZenDesk check failed: %s", e, exc_info=True)
+
         # Extract and store knowledge from the conversation (async, non-blocking)
         try:
             self._extract_knowledge(
@@ -482,6 +817,37 @@ class ClaudeWorker(BaseService):
             )
         except Exception as e:
             logger.debug("Knowledge extraction failed: %s", e)
+
+        # Update conversation summary for context retention
+        try:
+            self._update_conversation_summary(
+                user_email=actor.email if actor else "unknown",
+                user_text=user_text,
+                response_text=response_text,
+                intent=intent,
+                data_context=data_context,
+            )
+        except Exception as e:
+            logger.debug("Conversation summary update failed: %s", e)
+
+        # Store messages in Kevin's own history
+        u_email = actor.email if actor else "unknown"
+        data_keys = [k for k in data_context.keys() if k != "_timeout_notice"] if data_context else []
+        self._store_message(u_email, "user", user_text, intent=intent,
+                            had_data=bool(data_context), data_sources=data_keys)
+        self._store_message(u_email, "assistant", response_text, intent=intent,
+                            model_used=model_used, input_tokens=input_tokens,
+                            output_tokens=output_tokens)
+
+        # Learn about the user from this conversation
+        try:
+            self._update_user_profile_from_conversation(
+                user_email=u_email,
+                user_text=user_text,
+                response_text=response_text,
+            )
+        except Exception as e:
+            logger.debug("Profile learning failed: %s", e)
 
     # ── Prompt Construction ─────────────────────────────────────────
 
@@ -774,8 +1140,8 @@ class ClaudeWorker(BaseService):
 
     EXTRACTION_PROMPT = """Analyze this conversation exchange and extract any facts worth remembering 
 for future conversations. Focus on:
-- Host/device information (names, IPs, OS, roles, owners, issues)
-- Network topology facts
+- Host/device information (hostnames, IPs, OS, roles, owners, issues, services running)
+- Network topology facts (subnets, VLANs, zones, gateways, DNS)
 - Ongoing incidents or problems
 - User preferences or workflows
 - Policy or configuration details
@@ -786,6 +1152,15 @@ Return ONLY a JSON array of facts to store. Each fact should have:
 - "subject": short identifier (hostname, topic name)
 - "content": the fact in a clear sentence
 - "tags": array of relevant keywords
+
+For host/device facts, also include:
+- "asset_type": "server", "workstation", "network_device", "printer", "appliance", "vm", "container", "application", "service"
+- "hostname": the hostname if mentioned
+- "ip": IP address if mentioned
+- "os": operating system if mentioned
+- "purpose": what the device does
+- "owner": who owns/manages it
+- "criticality": "critical", "high", "medium", "low"
 
 If there are no new facts worth storing, return an empty array: []
 
@@ -866,6 +1241,7 @@ Return ONLY valid JSON, no markdown, no explanation."""
 
             # Store each fact
             stored = 0
+            assets_stored = 0
             with self._kb_conn.cursor() as cur:
                 for fact in facts[:5]:  # Max 5 facts per exchange
                     category = fact.get("category", "general")
@@ -876,7 +1252,7 @@ Return ONLY valid JSON, no markdown, no explanation."""
                     if not subject or not content:
                         continue
 
-                    # Upsert — update if same subject exists, otherwise insert
+                    # Upsert knowledge entry
                     cur.execute("""
                         INSERT INTO knowledge.entries 
                             (category, subject, content, source, tags, created_by)
@@ -888,13 +1264,569 @@ Return ONLY valid JSON, no markdown, no explanation."""
                     ])
                     stored += 1
 
+                    # If this is a host/device fact, also store in assets table
+                    if category in ("host", "network") and fact.get("hostname"):
+                        try:
+                            cur.execute("""
+                                INSERT INTO knowledge.assets
+                                    (asset_type, hostname, ip_addresses, os, purpose,
+                                     owner_email, criticality, notes, tags,
+                                     learned_from, confidence)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'conversation', 0.6)
+                                ON CONFLICT (hostname, asset_type) DO UPDATE SET
+                                    ip_addresses = CASE 
+                                        WHEN EXCLUDED.ip_addresses != '{}' THEN EXCLUDED.ip_addresses
+                                        ELSE knowledge.assets.ip_addresses END,
+                                    os = COALESCE(NULLIF(EXCLUDED.os, ''), knowledge.assets.os),
+                                    purpose = COALESCE(NULLIF(EXCLUDED.purpose, ''), knowledge.assets.purpose),
+                                    owner_email = COALESCE(NULLIF(EXCLUDED.owner_email, ''), knowledge.assets.owner_email),
+                                    notes = CASE
+                                        WHEN knowledge.assets.notes = '' THEN EXCLUDED.notes
+                                        ELSE knowledge.assets.notes || '; ' || EXCLUDED.notes END,
+                                    last_seen = NOW()
+                            """, [
+                                fact.get("asset_type", "server"),
+                                fact["hostname"],
+                                [fact["ip"]] if fact.get("ip") else [],
+                                fact.get("os", ""),
+                                fact.get("purpose", ""),
+                                fact.get("owner", ""),
+                                fact.get("criticality", "medium"),
+                                content,
+                                tags,
+                            ])
+                            assets_stored += 1
+                        except Exception:
+                            pass  # Non-fatal
+
             if stored > 0:
-                logger.info("Stored %d knowledge facts from conversation", stored)
+                logger.info("Stored %d knowledge facts, %d assets from conversation",
+                            stored, assets_stored)
 
         except json.JSONDecodeError:
             logger.debug("Knowledge extraction returned invalid JSON")
         except Exception as e:
             logger.debug("Knowledge extraction error: %s", e)
+
+    # ── User Memory & Conversation Context ─────────────────────────
+
+    SUMMARY_PROMPT = """You are a conversation state tracker. Given the previous summary and a new exchange, 
+produce an updated summary of the conversation so far. Focus on:
+
+1. WHAT is being discussed (topics, specific users/hosts/alerts/incidents)
+2. WHAT the user asked for or wants to accomplish
+3. WHAT you (Kevin) found, reported, or recommended
+4. WHAT is still unresolved or pending
+5. KEY ENTITIES mentioned (usernames, emails, hostnames, IPs, alert IDs)
+
+Also extract:
+- "topic": a 2-5 word label for the current conversation topic
+- "entities": array of key identifiers (emails, hostnames, IPs) mentioned
+- "open_items": array of unresolved questions or pending actions
+- "last_action": what Kevin last did or recommended
+
+Return ONLY valid JSON:
+{
+  "summary": "Updated conversational summary in 2-4 sentences",
+  "topic": "short topic label",
+  "entities": ["user@example.com", "hostname", "10.0.0.1"],
+  "open_items": ["Pending: disable mchen account", "Need to check mailbox activity"],
+  "last_action": "Recommended disabling mchen and revoking sessions"
+}
+
+Keep the summary concise — max 200 words. Carry forward important context from the previous summary.
+Return ONLY valid JSON, no markdown, no explanation."""
+
+    PROFILE_UPDATE_PROMPT = """Analyze this conversation and extract any personal or professional 
+information about the user worth remembering for future interactions.
+
+Current known profile:
+{current_profile}
+
+New exchange:
+{exchange}
+
+Return ONLY valid JSON (empty object {{}} if nothing new to learn):
+{{
+  "preferred_name": "nickname if mentioned",
+  "preferences": {{
+    "interests": ["hobbies, likes"],
+    "communication_style": "how they prefer info",
+    "fun_facts": ["personal tidbits"]
+  }},
+  "work_context": {{
+    "responsibilities": ["work duties"],
+    "systems_owned": ["systems they manage"],
+    "projects": ["active projects"],
+    "team_members": ["colleagues by email"]
+  }},
+  "rapport_notes": "relationship observations (brief)"
+}}
+
+Only extract concrete facts actually stated. Do NOT guess.
+Return ONLY valid JSON, no markdown."""
+
+    def _get_user_memory(self, user_email: str) -> str:
+        """Load Kevin's full memory about this user — profile + active session + recent history."""
+        if not self._ensure_kb_connection():
+            return ""
+
+        sections = []
+
+        try:
+            # Load user profile
+            with self._kb_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT display_name, first_name, preferred_name, job_title,
+                           department, manager_email, location, timezone,
+                           first_interaction, total_interactions,
+                           rapport_notes, preferences, work_context
+                    FROM knowledge.user_profiles
+                    WHERE user_email = %s
+                """, [user_email])
+                profile = cur.fetchone()
+
+                if profile:
+                    (name, first, preferred, title, dept, manager, loc, tz,
+                     first_int, total, rapport, prefs, work) = profile
+
+                    lines = ["[USER PROFILE — What you know about this person]"]
+                    lines.append(f"Name: {name or 'Unknown'}" +
+                                 (f" (goes by {preferred})" if preferred else ""))
+                    if title:
+                        lines.append(f"Title: {title}")
+                    if dept:
+                        lines.append(f"Department: {dept}")
+                    if manager:
+                        lines.append(f"Manager: {manager}")
+                    if loc:
+                        lines.append(f"Location: {loc}")
+                    if total:
+                        lines.append(f"You've had {total} conversations with them" +
+                                     (f" since {first_int.strftime('%B %Y')}" if first_int else ""))
+                    if rapport:
+                        lines.append(f"Notes: {rapport}")
+
+                    if prefs and isinstance(prefs, dict):
+                        pref_items = []
+                        for k, v in prefs.items():
+                            if isinstance(v, list) and v:
+                                pref_items.append(f"{k}: {', '.join(str(x) for x in v)}")
+                            elif v:
+                                pref_items.append(f"{k}: {v}")
+                        if pref_items:
+                            lines.append("Preferences: " + "; ".join(pref_items))
+
+                    if work and isinstance(work, dict):
+                        work_items = []
+                        for k, v in work.items():
+                            if isinstance(v, list) and v:
+                                work_items.append(f"{k}: {', '.join(str(x) for x in v)}")
+                            elif v:
+                                work_items.append(f"{k}: {v}")
+                        if work_items:
+                            lines.append("Work context: " + "; ".join(work_items))
+
+                    lines.append(
+                        "Use this knowledge naturally. Don't recite their profile back to them."
+                    )
+                    sections.append("\n".join(lines))
+
+            # Load conversation session
+            with self._kb_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT summary, topic, key_entities, open_questions, last_action,
+                           message_count, updated_at
+                    FROM knowledge.conversation_sessions
+                    WHERE user_email = %s AND agent_id = 'kevin'
+                    AND updated_at > NOW() - INTERVAL '4 hours'
+                    LIMIT 1
+                """, [user_email])
+                session = cur.fetchone()
+
+                if session:
+                    summary, topic, entities, open_items, last_action, msg_count, _ = session
+                    if summary:
+                        lines = ["[ACTIVE CONVERSATION — What you've been discussing]"]
+                        if topic:
+                            lines.append(f"Topic: {topic}")
+                        lines.append(f"Summary ({msg_count} messages): {summary}")
+                        if entities:
+                            lines.append(f"Key entities: {', '.join(entities)}")
+                        if open_items:
+                            lines.append(f"Pending items: {'; '.join(open_items)}")
+                        if last_action:
+                            lines.append(f"Your last action: {last_action}")
+                        lines.append(
+                            "Maintain continuity — the user expects you to remember this."
+                        )
+                        sections.append("\n".join(lines))
+
+            # Load recent message history as fallback context
+            with self._kb_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT role, content, created_at
+                    FROM knowledge.message_history
+                    WHERE user_email = %s AND agent_id = 'kevin'
+                    ORDER BY created_at DESC
+                    LIMIT 10
+                """, [user_email])
+                recent = cur.fetchall()
+
+                if recent and not session:
+                    recent.reverse()
+                    lines = ["[RECENT HISTORY — Last few exchanges with this user]"]
+                    for role, content, ts in recent:
+                        speaker = "User" if role == "user" else "Kevin"
+                        snippet = content[:150] + "..." if len(content) > 150 else content
+                        lines.append(f"  {speaker}: {snippet}")
+                    sections.append("\n".join(lines))
+
+        except Exception as e:
+            logger.debug("Could not load user memory: %s", e)
+
+        return "\n\n".join(sections) if sections else ""
+
+    def _ensure_user_profile(self, actor) -> None:
+        """Create or update user profile from actor info + IAM/EntraID data."""
+        if not actor or not actor.email or not self._ensure_kb_connection():
+            return
+
+        try:
+            # Check if this is a new user (no profile yet)
+            is_new = False
+            with self._kb_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id FROM knowledge.user_profiles WHERE user_email = %s
+                """, [actor.email])
+                is_new = cur.fetchone() is None
+
+            # For new users, pull rich data from IAM database
+            job_title = getattr(actor, 'job_title', None)
+            department = getattr(actor, 'department', None)
+            manager_email = None
+            office_location = None
+            work_ctx = {}
+
+            if is_new:
+                try:
+                    with self._kb_conn.cursor() as cur:
+                        # Get user details from IAM
+                        cur.execute("""
+                            SELECT u.job_title, u.department, u.account_enabled,
+                                   u.mfa_enabled, u.last_sign_in,
+                                   u.manager_email, u.office_location,
+                                   u.mobile_phone, u.employee_id
+                            FROM iam.users u
+                            WHERE u.email = %s
+                        """, [actor.email])
+                        iam_row = cur.fetchone()
+                        if iam_row:
+                            job_title = iam_row[0] or job_title
+                            department = iam_row[1] or department
+                            account_enabled = iam_row[2]
+                            mfa_enabled = iam_row[3]
+                            last_sign_in = iam_row[4]
+                            manager_email = iam_row[5]
+                            office_location = iam_row[6]
+                            mobile_phone = iam_row[7]
+                            employee_id = iam_row[8]
+
+                        # Get group memberships
+                        cur.execute("""
+                            SELECT g.name FROM iam.groups g
+                            JOIN iam.user_groups ug ON g.id = ug.group_id
+                            JOIN iam.users u ON u.id = ug.user_id
+                            WHERE u.email = %s
+                        """, [actor.email])
+                        groups = [r[0] for r in cur.fetchall()]
+
+                        # Get role assignments
+                        cur.execute("""
+                            SELECT r.name FROM iam.roles r
+                            JOIN iam.user_roles ur ON r.id = ur.role_id
+                            JOIN iam.users u ON u.id = ur.user_id
+                            WHERE u.email = %s
+                        """, [actor.email])
+                        roles = [r[0] for r in cur.fetchall()]
+
+                        # Build work context from IAM data
+                        work_ctx = {}
+                        if groups:
+                            work_ctx["groups"] = groups
+                        if roles:
+                            work_ctx["roles"] = roles
+                        if mfa_enabled is not None:
+                            work_ctx["mfa_enabled"] = mfa_enabled
+                        if account_enabled is not None:
+                            work_ctx["account_enabled"] = account_enabled
+                        if mobile_phone:
+                            work_ctx["mobile_phone"] = mobile_phone
+                        if employee_id:
+                            work_ctx["employee_id"] = employee_id
+
+                        logger.info(
+                            "Seeding profile for %s from IAM: title=%s dept=%s manager=%s groups=%d roles=%d",
+                            actor.email, job_title, department, manager_email,
+                            len(groups), len(roles),
+                        )
+                except Exception as e:
+                    logger.debug("Could not fetch IAM data for profile: %s", e)
+                    work_ctx = {}
+
+            with self._kb_conn.cursor() as cur:
+                # Build work_context JSON if we have it
+                work_context_json = json.dumps(work_ctx) if is_new and work_ctx else '{}'
+
+                cur.execute("""
+                    INSERT INTO knowledge.user_profiles
+                        (user_email, display_name, first_name, job_title,
+                         department, manager_email, location, work_context,
+                         first_interaction, last_interaction, total_interactions)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, NOW(), NOW(), 1)
+                    ON CONFLICT (user_email) DO UPDATE SET
+                        display_name = COALESCE(EXCLUDED.display_name, knowledge.user_profiles.display_name),
+                        first_name = COALESCE(EXCLUDED.first_name, knowledge.user_profiles.first_name),
+                        job_title = COALESCE(NULLIF(EXCLUDED.job_title, ''), knowledge.user_profiles.job_title),
+                        department = COALESCE(NULLIF(EXCLUDED.department, ''), knowledge.user_profiles.department),
+                        manager_email = COALESCE(NULLIF(EXCLUDED.manager_email, ''), knowledge.user_profiles.manager_email),
+                        location = COALESCE(NULLIF(EXCLUDED.location, ''), knowledge.user_profiles.location),
+                        work_context = CASE
+                            WHEN EXCLUDED.work_context != '{}'::jsonb
+                            THEN knowledge.user_profiles.work_context || EXCLUDED.work_context
+                            ELSE knowledge.user_profiles.work_context END,
+                        last_interaction = NOW(),
+                        total_interactions = knowledge.user_profiles.total_interactions + 1
+                """, [
+                    actor.email,
+                    actor.display_name,
+                    actor.display_name.split()[0] if actor.display_name else None,
+                    job_title,
+                    department,
+                    manager_email if is_new else None,
+                    office_location if is_new else None,
+                    work_context_json,
+                ])
+        except Exception as e:
+            logger.debug("Could not update user profile: %s", e)
+
+    def _store_message(
+        self, user_email: str, role: str, content: str,
+        intent: str = "", channel_type: str = "slack_dm",
+        had_data: bool = False, data_sources: list = None,
+        model_used: str = None, input_tokens: int = None, output_tokens: int = None,
+    ) -> None:
+        """Store a message in Kevin's own history."""
+        if not self._ensure_kb_connection():
+            return
+        try:
+            with self._kb_conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO knowledge.message_history
+                        (user_email, agent_id, role, content, channel_type,
+                         intent, had_data, data_sources, model_used,
+                         input_tokens, output_tokens)
+                    VALUES (%s, 'kevin', %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, [
+                    user_email, role, content[:5000], channel_type,
+                    intent, had_data, data_sources or [],
+                    model_used, input_tokens, output_tokens,
+                ])
+        except Exception as e:
+            logger.debug("Could not store message: %s", e)
+
+    def _get_conversation_summary(self, user_email: str) -> str:
+        """Deprecated — use _get_user_memory instead."""
+        return ""
+
+    def _update_conversation_summary(
+        self, user_email: str, user_text: str, response_text: str,
+        intent: str, data_context: Dict[str, Any],
+    ) -> None:
+        """Update rolling conversation summary after each exchange."""
+        if not self._ensure_kb_connection():
+            return
+
+        existing_summary = ""
+        try:
+            with self._kb_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT summary, message_count
+                    FROM knowledge.conversation_sessions
+                    WHERE user_email = %s AND agent_id = 'kevin'
+                    AND updated_at > NOW() - INTERVAL '4 hours'
+                """, [user_email])
+                row = cur.fetchone()
+                if row:
+                    existing_summary = row[0] or ""
+        except Exception:
+            pass
+
+        summary_input = ""
+        if existing_summary:
+            summary_input += f"PREVIOUS SUMMARY: {existing_summary}\n\n"
+        summary_input += f"NEW EXCHANGE:\nUser ({user_email}): {user_text}\n"
+        summary_input += f"Kevin: {response_text[:1000]}\n"
+        if data_context:
+            data_keys = [k for k in data_context.keys() if k != "_timeout_notice"]
+            if data_keys:
+                summary_input += f"[Data sources used: {', '.join(data_keys)}]\n"
+
+        try:
+            response = self._http.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": self._api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 500,
+                    "system": self.SUMMARY_PROMPT,
+                    "messages": [{"role": "user", "content": summary_input}],
+                },
+                timeout=15,
+            )
+            response.raise_for_status()
+
+            result_text = ""
+            for block in response.json().get("content", []):
+                if block.get("type") == "text":
+                    result_text += block["text"]
+
+            result_text = result_text.strip()
+            if result_text.startswith("```"):
+                result_text = result_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+            parsed = json.loads(result_text)
+            summary = parsed.get("summary", "")
+            if not summary:
+                return
+
+            with self._kb_conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO knowledge.conversation_sessions
+                        (user_email, agent_id, summary, topic, key_entities,
+                         open_questions, last_action, message_count)
+                    VALUES (%s, 'kevin', %s, %s, %s, %s, %s, 1)
+                    ON CONFLICT (user_email, agent_id) DO UPDATE SET
+                        summary = EXCLUDED.summary,
+                        topic = EXCLUDED.topic,
+                        key_entities = EXCLUDED.key_entities,
+                        open_questions = EXCLUDED.open_questions,
+                        last_action = EXCLUDED.last_action,
+                        message_count = knowledge.conversation_sessions.message_count + 1
+                """, [user_email, summary, parsed.get("topic", ""),
+                      parsed.get("entities", []), parsed.get("open_items", []),
+                      parsed.get("last_action", "")])
+
+            logger.info("Updated session for %s: topic=%s", user_email, parsed.get("topic", ""))
+
+        except json.JSONDecodeError:
+            logger.debug("Session summary returned invalid JSON")
+        except Exception as e:
+            logger.debug("Session summary update error: %s", e)
+
+    def _update_user_profile_from_conversation(
+        self, user_email: str, user_text: str, response_text: str,
+    ) -> None:
+        """Use Haiku to extract personal/professional info and update user profile."""
+        if not self._ensure_kb_connection():
+            return
+
+        # Skip very short exchanges
+        if len(user_text) < 15:
+            return
+
+        current_profile = "{}"
+        try:
+            with self._kb_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT preferred_name, rapport_notes, preferences, work_context
+                    FROM knowledge.user_profiles WHERE user_email = %s
+                """, [user_email])
+                row = cur.fetchone()
+                if row:
+                    current_profile = json.dumps({
+                        "preferred_name": row[0] or "",
+                        "rapport_notes": row[1] or "",
+                        "preferences": row[2] or {},
+                        "work_context": row[3] or {},
+                    }, indent=2)
+        except Exception:
+            pass
+
+        exchange = f"User: {user_text}\nKevin: {response_text[:800]}"
+        prompt = self.PROFILE_UPDATE_PROMPT.format(
+            current_profile=current_profile, exchange=exchange,
+        )
+
+        try:
+            response = self._http.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": self._api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 500,
+                    "system": prompt,
+                    "messages": [{"role": "user", "content": exchange}],
+                },
+                timeout=15,
+            )
+            response.raise_for_status()
+
+            result_text = ""
+            for block in response.json().get("content", []):
+                if block.get("type") == "text":
+                    result_text += block["text"]
+
+            result_text = result_text.strip()
+            if result_text.startswith("```"):
+                result_text = result_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+            updates = json.loads(result_text)
+            if not updates or updates == {}:
+                return
+
+            with self._kb_conn.cursor() as cur:
+                if updates.get("preferred_name"):
+                    cur.execute("""
+                        UPDATE knowledge.user_profiles
+                        SET preferred_name = %s WHERE user_email = %s
+                    """, [updates["preferred_name"], user_email])
+
+                if updates.get("rapport_notes"):
+                    cur.execute("""
+                        UPDATE knowledge.user_profiles
+                        SET rapport_notes = CASE
+                            WHEN rapport_notes = '' THEN %s
+                            ELSE rapport_notes || '; ' || %s
+                        END WHERE user_email = %s
+                    """, [updates["rapport_notes"], updates["rapport_notes"], user_email])
+
+                if updates.get("preferences"):
+                    cur.execute("""
+                        UPDATE knowledge.user_profiles
+                        SET preferences = preferences || %s::jsonb WHERE user_email = %s
+                    """, [json.dumps(updates["preferences"]), user_email])
+
+                if updates.get("work_context"):
+                    cur.execute("""
+                        UPDATE knowledge.user_profiles
+                        SET work_context = work_context || %s::jsonb WHERE user_email = %s
+                    """, [json.dumps(updates["work_context"]), user_email])
+
+            logger.info("Updated user profile for %s: %s", user_email, list(updates.keys()))
+
+        except json.JSONDecodeError:
+            logger.debug("Profile update returned invalid JSON")
+        except Exception as e:
+            logger.debug("Profile update error: %s", e)
 
     # ── Knowledge Base ───────────────────────────────────────────────
 
@@ -974,34 +1906,47 @@ Return ONLY valid JSON, no markdown, no explanation."""
                         + "\n".join(facts)
                     )
 
-            # Check for known hosts mentioned in the message
+            # Check for known assets mentioned in the message
             with self._kb_conn.cursor() as cur:
                 words = [w.strip(".,!?") for w in user_text.split() if len(w) > 2]
                 if words:
-                    placeholders = ",".join(["%s"] * len(words))
-                    cur.execute(f"""
-                        SELECT hostname, ip_address, os, role, location, 
-                               owner, notes, criticality
-                        FROM knowledge.hosts
-                        WHERE hostname ILIKE ANY(%s)
-                    """, [[f"%{w}%" for w in words]])
-                    hosts = cur.fetchall()
+                    try:
+                        cur.execute("""
+                            SELECT hostname, asset_type, ip_addresses, os, purpose,
+                                   owner_email, environment, criticality, network_zone,
+                                   notes, wazuh_instance
+                            FROM knowledge.assets
+                            WHERE hostname ILIKE ANY(%s)
+                               OR fqdn ILIKE ANY(%s)
+                               OR %s && aliases
+                            ORDER BY criticality DESC, last_seen DESC
+                            LIMIT 5
+                        """, [
+                            [f"%{w}%" for w in words],
+                            [f"%{w}%" for w in words],
+                            words,
+                        ])
+                        assets = cur.fetchall()
 
-                    if hosts:
-                        host_info = []
-                        for h in hosts:
-                            parts = [f"Host: {h[0]}"]
-                            if h[1]: parts.append(f"IP: {h[1]}")
-                            if h[2]: parts.append(f"OS: {h[2]}")
-                            if h[3]: parts.append(f"Role: {h[3]}")
-                            if h[4]: parts.append(f"Location: {h[4]}")
-                            if h[5]: parts.append(f"Owner: {h[5]}")
-                            if h[6]: parts.append(f"Notes: {h[6]}")
-                            if h[7]: parts.append(f"Criticality: {h[7]}")
-                            host_info.append(" | ".join(parts))
-                        sections.append(
-                            "[KNOWN HOSTS]\n" + "\n".join(host_info)
-                        )
+                        if assets:
+                            asset_info = []
+                            for a in assets:
+                                parts = [f"{a[1].title()}: {a[0]}"]
+                                if a[2]: parts.append(f"IPs: {', '.join(a[2][:3])}")
+                                if a[3]: parts.append(f"OS: {a[3]}")
+                                if a[4]: parts.append(f"Purpose: {a[4]}")
+                                if a[5]: parts.append(f"Owner: {a[5]}")
+                                if a[6]: parts.append(f"Env: {a[6]}")
+                                if a[7]: parts.append(f"Criticality: {a[7]}")
+                                if a[8]: parts.append(f"Zone: {a[8]}")
+                                if a[9]: parts.append(f"Notes: {a[9]}")
+                                if a[10]: parts.append(f"Monitored by: wazuh-{a[10]}")
+                                asset_info.append(" | ".join(parts))
+                            sections.append(
+                                "[KNOWN ASSETS — Devices/hosts you know about]\n" + "\n".join(asset_info)
+                            )
+                    except Exception:
+                        pass  # Table might not exist yet
 
             # Check for open incidents
             with self._kb_conn.cursor() as cur:
@@ -1188,6 +2133,559 @@ Return ONLY valid JSON, no markdown, no explanation."""
             self._kb_conn = None
 
         return ""
+
+    def _get_relevant_policies(self, user_text: str) -> str:
+        """Query company policies and approved tools relevant to the user's message."""
+        if not self._ensure_kb_connection():
+            return ""
+
+        try:
+            sections = []
+            text_lower = user_text.lower()
+
+            # Check for policy-related keywords
+            policy_relevant = any(w in text_lower for w in [
+                "policy", "policies", "allowed", "approved", "prohibited", "banned",
+                "can i use", "do we use", "are we allowed", "is it ok",
+                "usb", "dropbox", "slack", "vpn", "wifi", "password", "mfa",
+                "phishing", "report", "incident", "remote", "work from home",
+                "data", "classify", "sensitive", "confidential", "share",
+                "tool", "software", "install", "device", "laptop", "phone",
+                "badge", "visitor", "shred", "encrypt",
+            ])
+
+            if not policy_relevant:
+                return ""
+
+            # Search company policies
+            with self._kb_conn.cursor() as cur:
+                try:
+                    cur.execute("""
+                        SELECT title, summary, details, dos, donts, contact, category
+                        FROM knowledge.company_policies
+                        WHERE to_tsvector('english', title || ' ' || summary || ' ' || details)
+                            @@ plainto_tsquery('english', %s)
+                        ORDER BY created_at DESC
+                        LIMIT 3
+                    """, [user_text])
+                    policies = cur.fetchall()
+
+                    if policies:
+                        policy_lines = ["[COMPANY POLICIES — Share this information with the user]"]
+                        for title, summary, details, dos, donts, contact, cat in policies:
+                            policy_lines.append(f"\n**{title}** ({cat})")
+                            policy_lines.append(f"Summary: {summary}")
+                            if details:
+                                policy_lines.append(f"Details: {details}")
+                            if dos:
+                                policy_lines.append(f"Do: {'; '.join(dos)}")
+                            if donts:
+                                policy_lines.append(f"Don't: {'; '.join(donts)}")
+                            if contact:
+                                policy_lines.append(f"Questions? Contact: {contact}")
+                        sections.append("\n".join(policy_lines))
+                except Exception:
+                    pass  # Table might not exist yet
+
+            # Search approved/prohibited tools
+            with self._kb_conn.cursor() as cur:
+                try:
+                    # Extract potential tool names from the message
+                    words = [w.strip(".,!?\"'") for w in user_text.split() if len(w) > 2]
+                    cur.execute("""
+                        SELECT name, category, status, description, usage_guidelines,
+                               restrictions, alternative
+                        FROM knowledge.approved_tools
+                        WHERE LOWER(name) = ANY(%s)
+                           OR tags && %s
+                        LIMIT 5
+                    """, [
+                        [w.lower() for w in words],
+                        [w.lower() for w in words],
+                    ])
+                    tools = cur.fetchall()
+
+                    if tools:
+                        tool_lines = ["[APPROVED/PROHIBITED TOOLS — Share this with the user]"]
+                        for name, cat, status, desc, guidelines, restrictions, alt in tools:
+                            status_icon = {"approved": "✅", "prohibited": "🚫", "restricted": "⚠️"}.get(status, "❓")
+                            tool_lines.append(f"\n{status_icon} **{name}** — {status.upper()}")
+                            if desc:
+                                tool_lines.append(f"  {desc}")
+                            if guidelines:
+                                tool_lines.append(f"  Usage: {guidelines}")
+                            if restrictions:
+                                tool_lines.append(f"  Note: {restrictions}")
+                            if alt:
+                                tool_lines.append(f"  Alternative: {alt}")
+                        sections.append("\n".join(tool_lines))
+                except Exception:
+                    pass  # Table might not exist yet
+
+            return "\n\n".join(sections) if sections else ""
+
+        except Exception as e:
+            logger.debug("Policy lookup error: %s", e)
+            return ""
+
+    def _check_email_send(self, response_text: str, envelope: MessageEnvelope) -> None:
+        """
+        Parse Kevin's response for email send details.
+        
+        If Kevin composed an email (with To, Subject, Body), extract the
+        structured fields and publish to the email connector for actual delivery.
+        
+        Expected patterns in Kevin's response:
+        - **To:** user@domain.com
+        - **Subject:** Something
+        - Body text (everything after Subject line or in the email block)
+        """
+        import re
+
+        logger.info("Email send check — response preview: %s", response_text[:300])
+
+        # Extract explicit To: header first (most reliable)
+        to_match = re.search(
+            r'(?:\*\*)?To:?\*?\*?\s*:?\s*(.+?)(?:\n|$)',
+            response_text, re.IGNORECASE
+        )
+        
+        # Extract CC: header (to exclude from To list later)
+        cc_match = re.search(
+            r'(?:\*\*)?CC:?\*?\*?\s*:?\s*(.+?)(?:\n|$)',
+            response_text, re.IGNORECASE
+        )
+        cc_emails = set()
+        if cc_match:
+            cc_raw = cc_match.group(1).strip()
+            cc_raw = re.sub(r'<mailto:([^|>]+)\|[^>]+>', r'\1', cc_raw)
+            cc_emails = set(e.lower() for e in re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', cc_raw))
+
+        to_addrs = []
+
+        if to_match:
+            # Parse To: header specifically
+            to_raw = to_match.group(1).strip()
+            to_raw = re.sub(r'<mailto:([^|>]+)\|[^>]+>', r'\1', to_raw)
+            to_raw = re.sub(r'<mailto:([^>]+)>', r'\1', to_raw)
+            to_addrs = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', to_raw)
+            # Filter Kevin's own email from To
+            to_addrs = [e for e in to_addrs if e.lower() != 'kevin@heads-up.com']
+
+        if not to_addrs:
+            # Fallback: look for email addresses in response, excluding Kevin's and CC'd
+            all_emails = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', response_text)
+            seen = set()
+            for e in all_emails:
+                el = e.lower()
+                if el != 'kevin@heads-up.com' and el not in cc_emails and el not in seen:
+                    to_addrs.append(e)
+                    seen.add(el)
+
+        if not to_addrs:
+            # Fallback: check user's original text for recipient
+            user_text = envelope.payload.get("text", "")
+            user_text = re.sub(r'<mailto:([^|>]+)\|[^>]+>', r'\1', user_text)
+            to_addrs = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', user_text)
+
+        if not to_addrs:
+            # Fallback: "to me" / "my email" — use the user's email
+            user_text = envelope.payload.get("text", "")
+            if re.search(r'\b(to me|my email|my address)\b', user_text, re.IGNORECASE):
+                if envelope.actor and envelope.actor.email:
+                    to_addrs = [envelope.actor.email]
+
+        # Deduplicate while preserving order
+        seen = set()
+        deduped = []
+        for e in to_addrs:
+            if e.lower() not in seen:
+                deduped.append(e)
+                seen.add(e.lower())
+        to_addrs = deduped
+
+        if not to_addrs:
+            logger.info("Email send check — no recipient found, skipping")
+            return
+
+        # Extract Subject
+        subject = ""
+        subject_match = re.search(
+            r'(?:\*\*)?Subject:?\*?\*?\s*:?\s*(.+?)(?:\n|$)',
+            response_text, re.IGNORECASE
+        )
+        if subject_match:
+            subject = subject_match.group(1).strip().strip('*')
+
+        # Extract Body — look for text after the header block
+        body = ""
+        # Try to find body after Subject line
+        body_section = re.search(
+            r'(?:Subject:.*?\n\n?)(.*?)(?:\n---|\n\*\*|$)',
+            response_text, re.DOTALL | re.IGNORECASE
+        )
+        if body_section:
+            body = body_section.group(1).strip()
+        
+        # If no body found, try everything between headers and signature
+        if not body:
+            body_match = re.search(
+                r'(?:Body:?\s*:?\s*)(.*?)(?:\n---|\n\*\*|$)',
+                response_text, re.DOTALL | re.IGNORECASE
+            )
+            if body_match:
+                body = body_match.group(1).strip()
+
+        if not body:
+            # Last resort — use subject as body
+            body = subject or "Test email from Kevin Tutela"
+
+        if not subject:
+            subject = body[:50] + ("..." if len(body) > 50 else "")
+
+        logger.info(
+            "Email send detected: to=%s subject='%s' body_len=%d",
+            to_addrs, subject[:50], len(body)
+        )
+
+        # Publish structured send command to the email connector
+        send_msg = envelope.create_child(
+            source=self.service_name,
+            message_type="email.command.send",
+            payload={
+                "to": to_addrs,
+                "subject": subject,
+                "body": body,
+                "importance": "normal",
+            },
+        )
+        self.rmq.publish("email.command.send", send_msg)
+        logger.info("Published email send command to connector")
+
+    def _check_zendesk_create(self, response_text: str, envelope: MessageEnvelope) -> None:
+        """
+        Parse Kevin's response for ZenDesk ticket creation details.
+        
+        Expected patterns:
+        - **Ticket Subject:** ...
+        - **Ticket Priority:** ...
+        - **Ticket Type:** ...
+        - **Ticket Body:** ...
+        """
+        import re
+
+        logger.info("ZenDesk create check — response preview: %s", response_text[:300])
+
+        # Extract subject
+        subject = ""
+        subject_match = re.search(
+            r'(?:\*\*)?Ticket\s+Subject:?\*?\*?\s*:?\s*(.+?)(?:\n|$)',
+            response_text, re.IGNORECASE
+        )
+        if subject_match:
+            subject = subject_match.group(1).strip().strip('*')
+
+        # Fallback: look for **Subject:** without "Ticket"
+        if not subject:
+            subject_match = re.search(
+                r'(?:\*\*)?Subject:?\*?\*?\s*:?\s*(.+?)(?:\n|$)',
+                response_text, re.IGNORECASE
+            )
+            if subject_match:
+                subject = subject_match.group(1).strip().strip('*')
+
+        if not subject:
+            logger.info("ZenDesk create check — no subject found, skipping")
+            return
+
+        # Extract priority
+        priority = "normal"
+        priority_match = re.search(
+            r'(?:\*\*)?(?:Ticket\s+)?Priority:?\*?\*?\s*:?\s*(urgent|high|normal|low)',
+            response_text, re.IGNORECASE
+        )
+        if priority_match:
+            priority = priority_match.group(1).lower()
+
+        # Extract type
+        ticket_type = "incident"
+        type_match = re.search(
+            r'(?:\*\*)?(?:Ticket\s+)?Type:?\*?\*?\s*:?\s*(problem|incident|question|task)',
+            response_text, re.IGNORECASE
+        )
+        if type_match:
+            ticket_type = type_match.group(1).lower()
+
+        # Extract body
+        body = ""
+        body_match = re.search(
+            r'(?:\*\*)?(?:Ticket\s+)?Body:?\*?\*?\s*:?\s*\n?(.*?)(?:\n---|\Z)',
+            response_text, re.DOTALL | re.IGNORECASE
+        )
+        if body_match:
+            body = body_match.group(1).strip()
+
+        if not body:
+            # Try content after subject
+            body_section = re.search(
+                r'(?:Subject:.*?\n\n?)(.*?)(?:\n---|\n\*\*Ticket|\Z)',
+                response_text, re.DOTALL | re.IGNORECASE
+            )
+            if body_section:
+                body = body_section.group(1).strip()
+
+        if not body:
+            body = subject
+
+        # Extract tags
+        tags = []
+        tags_match = re.search(
+            r'(?:\*\*)?Tags?:?\*?\*?\s*:?\s*(.+?)(?:\n|$)',
+            response_text, re.IGNORECASE
+        )
+        if tags_match:
+            tags = [t.strip().strip('`*') for t in tags_match.group(1).split(",")]
+
+        logger.info(
+            "ZenDesk ticket detected: subject='%s' priority=%s type=%s body_len=%d tags=%s",
+            subject[:50], priority, ticket_type, len(body), tags
+        )
+
+        # Build email body with ticket metadata
+        email_body_parts = [body]
+        if priority != "normal":
+            email_body_parts.append(f"\nPriority: {priority}")
+        if ticket_type != "incident":
+            email_body_parts.append(f"Type: {ticket_type}")
+        if tags:
+            email_body_parts.append(f"Tags: {', '.join(tags)}")
+
+        # Create ticket via email — send to ZenDesk support address
+        # ZenDesk creates the ticket with Kevin as requester
+        ZENDESK_SUPPORT_EMAIL = "ITSupport@heads-up.com"
+
+        send_msg = envelope.create_child(
+            source=self.service_name,
+            message_type="email.command.send",
+            payload={
+                "to": [ZENDESK_SUPPORT_EMAIL],
+                "subject": subject,
+                "body": "\n".join(email_body_parts),
+                "importance": "high" if priority in ("urgent", "high") else "normal",
+            },
+        )
+        self.rmq.publish("email.command.send", send_msg)
+        logger.info("Published ZenDesk ticket creation via email to %s", ZENDESK_SUPPORT_EMAIL)
+
+    def _check_zendesk_update(self, response_text: str, envelope: MessageEnvelope, intent: str) -> None:
+        """
+        Parse Kevin's response for ZenDesk ticket update/close/comment details.
+        
+        Expected patterns:
+        - **Ticket ID:** 12345
+        - **Action:** close/update/comment
+        - **Status:** solved/open/pending
+        - **Comment:** text
+        """
+        import re
+
+        logger.info("ZenDesk update check — response preview: %s", response_text[:300])
+
+        # Extract ticket ID
+        ticket_id = None
+        id_match = re.search(
+            r'(?:\*\*)?Ticket\s+(?:ID|#):?\*?\*?\s*:?\s*#?(\d+)',
+            response_text, re.IGNORECASE
+        )
+        if not id_match:
+            id_match = re.search(r'ticket\s+#?(\d{2,})', response_text, re.IGNORECASE)
+        if id_match:
+            ticket_id = int(id_match.group(1))
+
+        if not ticket_id:
+            logger.info("ZenDesk update check — no ticket ID found, skipping")
+            return
+
+        # Determine action
+        action = "update"
+        action_match = re.search(
+            r'(?:\*\*)?Action:?\*?\*?\s*:?\s*(close|solve|update|comment|resolve)',
+            response_text, re.IGNORECASE
+        )
+        if action_match:
+            action = action_match.group(1).lower()
+            if action in ("close", "solve", "resolve"):
+                action = "close"
+
+        # If intent is zendesk_comment, force comment action
+        if intent == "zendesk_comment":
+            action = "comment"
+
+        # Extract status
+        status = None
+        status_match = re.search(
+            r'(?:\*\*)?Status:?\*?\*?\s*:?\s*(new|open|pending|hold|solved|closed)',
+            response_text, re.IGNORECASE
+        )
+        if status_match:
+            status = status_match.group(1).lower()
+
+        # Extract comment/note
+        comment = ""
+        comment_match = re.search(
+            r'(?:\*\*)?(?:Comment|Note|Details?):?\*?\*?\s*:?\s*\n?(.*?)(?:\n---|\n\*\*|\Z)',
+            response_text, re.DOTALL | re.IGNORECASE
+        )
+        if comment_match:
+            comment = comment_match.group(1).strip()
+
+        # Check if internal note
+        is_internal = bool(re.search(r'internal\s+note', response_text, re.IGNORECASE))
+
+        if action == "close":
+            msg_type = "zendesk.command.close"
+            payload = {"ticket_id": ticket_id, "status": status or "solved"}
+            if comment:
+                payload["comment"] = comment
+        elif action == "comment":
+            msg_type = "zendesk.command.comment"
+            payload = {
+                "ticket_id": ticket_id,
+                "body": comment or "Updated by Kevin Tutela",
+                "public": not is_internal,
+            }
+        else:
+            msg_type = "zendesk.command.update"
+            payload = {"ticket_id": ticket_id}
+            if status:
+                payload["status"] = status
+            if comment:
+                payload["comment"] = comment
+                payload["internal_note"] = is_internal
+
+        logger.info(
+            "ZenDesk %s detected: ticket_id=%s payload=%s",
+            action, ticket_id, {k: v for k, v in payload.items() if k != "body"}
+        )
+
+        update_msg = envelope.create_child(
+            source=self.service_name,
+            message_type=msg_type,
+            payload=payload,
+        )
+        self.rmq.publish(msg_type, update_msg)
+        logger.info("Published ZenDesk %s command to connector", action)
+
+    def _check_powershell_proposal(self, response_text: str, envelope: MessageEnvelope) -> None:
+        """
+        Parse Kevin's response for a PowerShell command proposal.
+        
+        If Kevin proposed a command with an approval ID, store it in the
+        powershell_executions table so the connector can execute it on approval.
+        
+        Expected format in Kevin's response:
+        "approve <8-hex-char-id>"
+        And a code block with the command.
+        """
+        import re
+
+        # Look for approval ID pattern
+        approve_match = re.search(r'approve\s+([a-f0-9]{6,8})', response_text.lower())
+        if not approve_match:
+            return
+
+        request_id = approve_match.group(1)
+
+        # Extract the command from a code block
+        code_match = re.search(r'```\n?(.*?)\n?```', response_text, re.DOTALL)
+        if not code_match:
+            # Try single-line backticks
+            code_match = re.search(r'`([^`]+)`', response_text)
+        if not code_match:
+            logger.debug("Found approval ID %s but no command block", request_id)
+            return
+
+        command = code_match.group(1).strip()
+
+        # Extract target host — look for "on **HOSTNAME**" pattern or "on HOSTNAME (IP)"
+        # Must be specific to avoid grabbing random bold text like **What happened:**
+        target_host = "unknown"
+        
+        # Pattern 1: "on **HOSTNAME**" or "on **HOSTNAME** (IP)"
+        # Hostname must contain a hyphen, digit, or be all-uppercase to avoid matching English words
+        host_match = re.search(
+            r'(?:on|for|from)\s+\*\*([A-Za-z0-9_-]{3,}(?:\.[A-Za-z0-9_-]+)*)\*\*',
+            response_text
+        )
+        if host_match:
+            candidate = host_match.group(1)
+            # Valid hostnames typically have hyphens, digits, or are all-uppercase
+            if re.search(r'[-\d]', candidate) or candidate.isupper():
+                target_host = candidate
+        
+        # Pattern 2: "(IP)" after hostname — extract hostname before it
+        if target_host == "unknown":
+            host_match = re.search(
+                r'\*\*([A-Za-z0-9_-]{3,}(?:\.[A-Za-z0-9_-]+)*)\*\*\s*\(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\)',
+                response_text
+            )
+            if host_match:
+                target_host = host_match.group(1)
+        
+        # Pattern 3: "on HOSTNAME" without bold (3+ chars, contains a hyphen or uppercase)
+        if target_host == "unknown":
+            host_match = re.search(
+                r'(?:on|for|from)\s+([A-Z][A-Za-z0-9_-]{2,})',
+                response_text
+            )
+            if host_match:
+                candidate = host_match.group(1)
+                # Filter out common false positives
+                if candidate.lower() not in ("the", "this", "that", "your", "host", "server", "machine"):
+                    target_host = candidate
+
+        user_email = envelope.actor.email if envelope.actor else "unknown"
+
+        # Store in the database so the connector can find it on approval
+        if not self._ensure_kb_connection():
+            return
+
+        try:
+            with self._kb_conn.cursor() as cur:
+                # Ensure table exists
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS knowledge.powershell_executions (
+                        id SERIAL PRIMARY KEY,
+                        request_id VARCHAR(36) NOT NULL UNIQUE,
+                        requested_by VARCHAR(255) NOT NULL,
+                        target_host VARCHAR(255) NOT NULL,
+                        command TEXT NOT NULL,
+                        reason TEXT DEFAULT '',
+                        status VARCHAR(50) DEFAULT 'pending',
+                        approved_by VARCHAR(255),
+                        approved_at TIMESTAMPTZ,
+                        output TEXT,
+                        error_output TEXT,
+                        exit_code INT,
+                        execution_time_ms INT,
+                        executed_at TIMESTAMPTZ,
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                cur.execute("""
+                    INSERT INTO knowledge.powershell_executions
+                        (request_id, requested_by, target_host, command, status)
+                    VALUES (%s, %s, %s, %s, 'pending')
+                    ON CONFLICT (request_id) DO NOTHING
+                """, [request_id, user_email, target_host, command])
+
+            logger.info(
+                "Stored PowerShell proposal [%s]: %s on %s (by %s)",
+                request_id, command[:60], target_host, user_email,
+            )
+        except Exception as e:
+            logger.warning("Failed to store PowerShell proposal: %s", e)
 
     # ── Claude API ──────────────────────────────────────────────────
 

@@ -140,7 +140,7 @@ class WazuhConnector(BaseService):
         """Set up RabbitMQ queues for Wazuh query requests."""
         prefix = self._routing_prefix
         self.inbox = self.rmq.declare_queue(
-            f"connector-{self.config.service_name}.inbox",
+            f"{self.config.service_name}.inbox",
             routing_keys=[
                 f"{prefix}.query.alerts",
                 f"{prefix}.query.agents",
@@ -859,5 +859,9 @@ class WazuhConnector(BaseService):
 # ── Entrypoint ──────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    service = WazuhConnector.create("connector-wazuh")
+    import os
+    svc = os.environ.get("NEURO_SERVICE_NAME", "connector-wazuh")
+    if svc.startswith("connector-"):
+        svc = svc[len("connector-"):]
+    service = WazuhConnector.create(svc)
     service.run()

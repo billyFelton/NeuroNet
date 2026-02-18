@@ -8,6 +8,7 @@ Handles:
 - Full initial sync on startup
 - Periodic delta sync on interval
 - Group membership resolution
+- Manager chain resolution
 - Automatic role assignment via group → role mappings
 """
 
@@ -166,12 +167,12 @@ class EntraSyncService:
         user_count = await self._sync_users()
         group_count = await self._sync_groups()
         await self._sync_group_memberships()
-        role_count = await self._apply_group_role_mappings()
+        manager_count = await self._sync_managers()
 
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
         logger.info(
-            "EntraID sync complete: %d users, %d groups, %d role assignments (%.1fs)",
-            user_count, group_count, role_count, elapsed,
+            "EntraID sync complete: %d users, %d groups, %d managers (%.1fs)",
+            user_count, group_count, manager_count, elapsed,
         )
 
     async def _sync_users(self) -> int:
@@ -180,7 +181,8 @@ class EntraSyncService:
             "/users",
             params={
                 "$select": "id,mail,displayName,userPrincipalName,jobTitle,"
-                          "department,accountEnabled",
+                          "department,accountEnabled,officeLocation,"
+                          "mobilePhone,employeeId",
                 "$top": "999",
             },
         )
@@ -195,8 +197,10 @@ class EntraSyncService:
             await self._db.execute(
                 """
                 INSERT INTO iam.users (id, email, display_name, upn, job_title,
-                                       department, account_enabled, entra_synced_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                                       department, account_enabled,
+                                       office_location, mobile_phone, employee_id,
+                                       entra_synced_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                 ON CONFLICT (id) DO UPDATE SET
                     email = EXCLUDED.email,
                     display_name = EXCLUDED.display_name,
@@ -204,6 +208,9 @@ class EntraSyncService:
                     job_title = EXCLUDED.job_title,
                     department = EXCLUDED.department,
                     account_enabled = EXCLUDED.account_enabled,
+                    office_location = EXCLUDED.office_location,
+                    mobile_phone = EXCLUDED.mobile_phone,
+                    employee_id = EXCLUDED.employee_id,
                     entra_synced_at = NOW(),
                     updated_at = NOW()
                 """,
@@ -215,6 +222,9 @@ class EntraSyncService:
                     user.get("jobTitle"),
                     user.get("department"),
                     user.get("accountEnabled", True),
+                    user.get("officeLocation"),
+                    user.get("mobilePhone"),
+                    user.get("employeeId"),
                 ],
             )
             count += 1
@@ -230,6 +240,43 @@ class EntraSyncService:
             )
 
         return count
+
+    async def _sync_managers(self) -> int:
+        """Resolve manager relationships from EntraID.
+
+        Graph API requires a separate call per user to get their manager,
+        so we iterate through all active users. This runs after user sync
+        so all users exist locally.
+        """
+        users = await self._db.fetch_all(
+            "SELECT id, email FROM iam.users WHERE account_enabled = TRUE"
+        )
+
+        resolved = 0
+        for user in users:
+            try:
+                result = await self._graph_get(f"/users/{user['id']}/manager")
+                manager_email = result.get("mail")
+                if manager_email:
+                    await self._db.execute(
+                        "UPDATE iam.users SET manager_email = %s WHERE id = %s",
+                        [manager_email, user["id"]],
+                    )
+                    resolved += 1
+            except httpx.HTTPStatusError as e:
+                # 404 = user has no manager assigned (top of org chart)
+                if e.response.status_code == 404:
+                    continue
+                # 403 = permission issue, log and continue
+                if e.response.status_code == 403:
+                    logger.debug("No permission to read manager for %s", user["email"])
+                    continue
+                logger.warning("Failed to get manager for %s: %s", user["email"], e)
+            except Exception as e:
+                logger.debug("Manager resolution error for %s: %s", user["email"], e)
+
+        logger.info("Resolved %d/%d manager relationships", resolved, len(users))
+        return resolved
 
     async def _sync_groups(self) -> int:
         """Sync groups from EntraID to iam.groups."""
@@ -329,60 +376,3 @@ class EntraSyncService:
                     "DELETE FROM iam.user_groups WHERE user_id = %s AND group_id = %s",
                     [user_id, group_id],
                 )
-
-    async def _apply_group_role_mappings(self) -> int:
-        """
-        Apply group → role mappings from iam.group_role_mappings.
-
-        For each mapping, insert user_roles for all users in that group.
-        Returns total number of role assignments (new + existing).
-        """
-        # Get all group→role mappings
-        mappings = await self._db.fetch_all(
-            "SELECT group_id, role_id FROM iam.group_role_mappings"
-        )
-
-        if not mappings:
-            logger.info("No group→role mappings configured, skipping role assignment")
-            return 0
-
-        total_assigned = 0
-        for mapping in mappings:
-            group_id = str(mapping["group_id"])
-            role_id = str(mapping["role_id"])
-
-            # Insert role for all members of this group (skip conflicts)
-            result = await self._db.execute(
-                """
-                INSERT INTO iam.user_roles (user_id, role_id)
-                SELECT ug.user_id, %s
-                FROM iam.user_groups ug
-                WHERE ug.group_id = %s
-                ON CONFLICT (user_id, role_id) DO NOTHING
-                """,
-                [role_id, group_id],
-            )
-            count = result if isinstance(result, int) else 0
-            total_assigned += count
-
-        # Clean up stale role assignments: remove roles where user is no longer
-        # in the mapped group (but only for roles that come from group mappings)
-        mapped_role_ids = list(set(str(m["role_id"]) for m in mappings))
-        await self._db.execute(
-            """
-            DELETE FROM iam.user_roles ur
-            WHERE ur.role_id = ANY(%s)
-              AND NOT EXISTS (
-                SELECT 1 FROM iam.user_groups ug
-                JOIN iam.group_role_mappings grm ON ug.group_id = grm.group_id
-                WHERE ug.user_id = ur.user_id AND grm.role_id = ur.role_id
-              )
-            """,
-            [mapped_role_ids],
-        )
-
-        logger.info(
-            "Applied %d group→role mappings, %d role assignments",
-            len(mappings), total_assigned,
-        )
-        return total_assigned

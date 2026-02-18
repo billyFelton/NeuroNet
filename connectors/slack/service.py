@@ -598,7 +598,7 @@ class SlackConnector(BaseService):
         self,
         channel: str,
         thread_ts: str,
-        limit: int = 10,
+        limit: int = 20,
     ) -> List[Dict[str, str]]:
         """Fetch recent conversation history for context."""
         try:

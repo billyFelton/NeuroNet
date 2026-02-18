@@ -134,6 +134,34 @@ INTENT_PATTERNS = [
             ],
         ),
     },
+    # Host / IP / Asset lookup — routes to Wazuh agent data
+    # NOTE: text is lowercased before matching
+    {
+        "pattern": r"\b(ip\s+(address|for|of)|what\s+(is|are)\s+(the\s+)?ip|find\s+(the\s+)?(ip|host|machine|server)|look\s*up\s+(host|machine|ip|server)|host\s+(info|detail|lookup|status)|which\s+(ip|address)|where\s+is\s+\w+[-_]|what.{0,15}(going\s+on|happening).{0,15}(with|on)\s+\w+[-_])\b",
+        "intent": Intent(
+            name="host_lookup",
+            resources=[("wazuh-agents", "query")],
+            data_queries=[
+                {"routing_key": "wazuh.query.agents", "type": "desktop-agents"},
+                {"routing_key": "wazuh-infra.query.agents", "type": "infra-agents"},
+            ],
+        ),
+    },
+    # Named host investigation — catches "check on HOSTNAME", "investigate HOSTNAME" etc
+    # NOTE: text is lowercased, so hostname patterns must be lowercase
+    {
+        "pattern": r"\b(check\s+(on\s+)?[a-z][a-z0-9_-]{4,}|investigate\s+[a-z][a-z0-9_-]{4,}|status\s+(of|for)\s+[a-z][a-z0-9_-]{4,}|what.{0,10}(wrong|up|happening).{0,10}[a-z][a-z0-9_-]{4,})\b",
+        "intent": Intent(
+            name="host_investigation",
+            resources=[("wazuh-agents", "query"), ("wazuh-alerts", "query")],
+            data_queries=[
+                {"routing_key": "wazuh.query.agents", "type": "desktop-agents"},
+                {"routing_key": "wazuh-infra.query.agents", "type": "infra-agents"},
+                {"routing_key": "wazuh.query.alerts", "type": "desktop-alerts"},
+                {"routing_key": "wazuh-infra.query.alerts", "type": "infra-alerts"},
+            ],
+        ),
+    },
     # Identity / EntraID
     {
         "pattern": r"\b(sign.?in|login|auth.*log|failed\s+login|brute\s+force)\b",
@@ -191,7 +219,136 @@ INTENT_PATTERNS = [
             resources=[("audit-logs", "query")],
         ),
     },
-    # Email — search specific mailbox (most specific, must be first)
+    # ── ZenDesk Tickets (must come BEFORE email patterns) ──
+    # Create ticket
+    {
+        "pattern": r"\b(create\s+(a\s+)?(ticket|zendesk|issue)|open\s+(a\s+)?(ticket|issue)|new\s+ticket|submit\s+(a\s+)?ticket|file\s+(a\s+)?ticket|raise\s+(a\s+)?ticket|test\s+ticket)\b",
+        "intent": Intent(
+            name="zendesk_create",
+            resources=[("zendesk", "create")],
+            data_queries=[],
+        ),
+    },
+    # Update/close ticket
+    {
+        "pattern": r"\b(update\s+ticket|close\s+ticket|solve\s+ticket|resolve\s+ticket|change\s+ticket|modify\s+ticket|set\s+ticket|mark\s+ticket)\b",
+        "intent": Intent(
+            name="zendesk_update",
+            resources=[("zendesk", "update")],
+            data_queries=[],
+        ),
+    },
+    # Add comment to ticket
+    {
+        "pattern": r"\b(comment\s+on\s+ticket|add\s+(a\s+)?(comment|note)\s+to\s+ticket|reply\s+to\s+ticket|internal\s+note\s+on)\b",
+        "intent": Intent(
+            name="zendesk_comment",
+            resources=[("zendesk", "update")],
+            data_queries=[],
+        ),
+    },
+    # Query specific ticket
+    {
+        "pattern": r"\b(ticket\s+#?\d{2,}|show\s+(me\s+)?ticket|get\s+ticket|pull\s+(up\s+)?ticket|look\s+up\s+ticket|check\s+ticket)\b",
+        "intent": Intent(
+            name="zendesk_get",
+            resources=[("zendesk", "query")],
+            data_queries=[{"routing_key": "zendesk.query.ticket", "type": "zendesk-ticket"}],
+        ),
+    },
+    # Search/list tickets
+    {
+        "pattern": r"\b(search\s+tickets?|find\s+tickets?|list\s+tickets?|show\s+(all\s+|open\s+|my\s+|urgent\s+|high\s+|pending\s+|active\s+)?tickets?|open\s+tickets?|pending\s+tickets?|active\s+tickets?|pull\s+(all\s+|open\s+|active\s+|my\s+)?tickets?|get\s+(all\s+|open\s+|active\s+|my\s+)?tickets?|check\s+(the\s+)?tickets?|zendesk\s+(search|list|status|report|tickets?)|filter\s+(by\s+)?tickets?|tickets?\s+(for|from|in|about|tagged|brand|status|queue)|unassigned\s+tickets?|urgent\s+tickets?|high\s+priority\s+tickets?|it\s+(brand|tickets?)|just\s+(the\s+)?(it|heads)|ticket\s+(queue|board|list|status))\b",
+        "intent": Intent(
+            name="zendesk_search",
+            resources=[("zendesk", "query")],
+            data_queries=[{"routing_key": "zendesk.query.search", "type": "zendesk-search"}],
+        ),
+    },
+    # ── Meraki Network ──
+    # Network summary / overview
+    {
+        "pattern": r"\b(meraki\s+(summary|overview|status|dashboard|report)|network\s+(summary|overview|status|health|report)|show\s+(me\s+)?the?\s*network|how\s+(is|are)\s+the?\s*network)\b",
+        "intent": Intent(
+            name="meraki_summary",
+            resources=[("meraki", "query")],
+            data_queries=[{"routing_key": "meraki.query.summary", "type": "meraki-summary"}],
+        ),
+    },
+    # Network devices (switches, APs, appliances)
+    {
+        "pattern": r"\b(meraki\s+devices?|network\s+devices?|switches|access\s+points?|APs?\b|appliances?|show\s+(me\s+)?(all\s+)?devices|list\s+devices|what\s+devices|meraki\s+(switch|ap|wireless))\b",
+        "intent": Intent(
+            name="meraki_devices",
+            resources=[("meraki", "query")],
+            data_queries=[{"routing_key": "meraki.query.devices", "type": "meraki-devices"}],
+        ),
+    },
+    # Device status (online/offline/alerting)
+    {
+        "pattern": r"\b(device\s+status|devices?\s+(online|offline|down|alerting)|what.s\s+(down|offline)|network\s+outage|meraki\s+(outage|down|offline)|anything\s+down)\b",
+        "intent": Intent(
+            name="meraki_device_status",
+            resources=[("meraki", "query")],
+            data_queries=[{"routing_key": "meraki.query.device_status", "type": "meraki-status"}],
+        ),
+    },
+    # Network clients
+    {
+        "pattern": r"\b(meraki\s+clients?|network\s+clients?|connected\s+(devices?|clients?|endpoints?)|who.s\s+(on|connected)|what.s\s+connected|show\s+clients)\b",
+        "intent": Intent(
+            name="meraki_clients",
+            resources=[("meraki", "query")],
+            data_queries=[{"routing_key": "meraki.query.clients", "type": "meraki-clients"}],
+        ),
+    },
+    # Client search (by IP, MAC, hostname)
+    {
+        "pattern": r"\b(find\s+(client|device|endpoint|host)\s|look\s*up\s+(client|mac|ip)|where\s+is\s+\d{1,3}\.\d|which\s+(port|switch|vlan)\s+(is|has)|what\s+port\s+is|trace\s+(mac|ip|client)|locate\s+(device|client|mac|ip))\b",
+        "intent": Intent(
+            name="meraki_client_search",
+            resources=[("meraki", "query")],
+            data_queries=[{"routing_key": "meraki.query.client_search", "type": "meraki-client-search"}],
+        ),
+    },
+    # VLANs
+    {
+        "pattern": r"\b(vlans?|show\s+(me\s+)?vlans?|list\s+vlans?|vlan\s+(config|list|info|status)|network\s+segments?|subnets?)\b",
+        "intent": Intent(
+            name="meraki_vlans",
+            resources=[("meraki", "query")],
+            data_queries=[{"routing_key": "meraki.query.vlans", "type": "meraki-vlans"}],
+        ),
+    },
+    # DHCP
+    {
+        "pattern": r"\b(dhcp|dhcp\s+(leases?|config|status|scope|reservation)|ip\s+reservations?|fixed\s+ip)\b",
+        "intent": Intent(
+            name="meraki_dhcp",
+            resources=[("meraki", "query")],
+            data_queries=[{"routing_key": "meraki.query.dhcp", "type": "meraki-dhcp"}],
+        ),
+    },
+    # Uplinks (WAN status)
+    {
+        "pattern": r"\b(uplinks?|wan\s+(status|connection|link)|internet\s+(connection|status|link)|isp\s+status)\b",
+        "intent": Intent(
+            name="meraki_uplinks",
+            resources=[("meraki", "query")],
+            data_queries=[{"routing_key": "meraki.query.uplinks", "type": "meraki-uplinks"}],
+        ),
+    },
+    # Email — send (must come AFTER ZenDesk and Meraki patterns)
+    # NOTE: No data_queries — the AI worker composes the email and posts to connector
+    {
+        "pattern": r"\b(send\s+(an?\s+)?(test\s+)?email|send\s+(a\s+)?(test\s+)?(message|notification|alert)\s+to|write\s+to\s+\S+@|compose|draft\s+(an?\s+)?email|send\s+\S+@|send\s+(it|that|this)\s+to|notify\s+\S+@|send\s+.{0,20}(to|email)|test\s+email)\b",
+        "intent": Intent(
+            name="email_send",
+            resources=[("email", "send")],
+            data_queries=[],
+        ),
+    },
+    # Email — search specific mailbox
     {
         "pattern": r"(search\s+\S+@\S+|check\s+\S+@\S+.*(mail|inbox)|look\s+(in|at)\s+\S+@\S+|emails?\s+(from|to)\s+\S+@\S+|show\s+(me\s+)?emails?\s+(in|from|for)\s+\S+@|get\s+emails?\s+(from|in)\s+\S+@|\S+@\S+.*(inbox|mailbox|emails?).*(?:for|with|about|contain|subject))",
         "intent": Intent(
@@ -209,15 +366,6 @@ INTENT_PATTERNS = [
             data_queries=[{"routing_key": "email.command.search_org", "type": "email-search-org"}],
         ),
     },
-    # Email — send
-    {
-        "pattern": r"\b(send\s+(an?\s+)?email|write\s+to|compose|draft\s+(an?\s+)?email|send\s+\S+@)\b",
-        "intent": Intent(
-            name="email_send",
-            resources=[("email", "send")],
-            data_queries=[{"routing_key": "email.command.send", "type": "email-send"}],
-        ),
-    },
     # Email — check inbox
     {
         "pattern": r"\b(inbox|check\s+(my\s+)?mail|check\s+(my\s+)?email|unread|my\s+email|read\s+email|show\s+(my\s+)?mail)\b",
@@ -225,6 +373,43 @@ INTENT_PATTERNS = [
             name="email_list",
             resources=[("email", "query")],
             data_queries=[{"routing_key": "email.command.list", "type": "email-list"}],
+        ),
+    },
+    # Email — check sent folder / sent items
+    {
+        "pattern": r"\b(sent\s+(folder|items|mail|emails?)|check\s+(your|my|his|her)\s+sent|show\s+sent|what\s+did\s+(you|i)\s+send|did\s+(the|that|my|your)\s+email\s+(send|go))\b",
+        "intent": Intent(
+            name="email_sent",
+            resources=[("email", "query")],
+            data_queries=[{"routing_key": "email.command.list", "type": "email-sent"}],
+        ),
+    },
+    # ── PowerShell / Remote Execution ──
+    # Approve a pending PowerShell command
+    {
+        "pattern": r"\bapprove\s+[a-f0-9]{6,8}\b",
+        "intent": Intent(
+            name="powershell_approve",
+            resources=[("powershell-execute", "execute")],
+            data_queries=[{"routing_key": "powershell.command.execute", "type": "powershell-exec"}],
+        ),
+    },
+    # Deny a pending PowerShell command  
+    {
+        "pattern": r"\bdeny\s+[a-f0-9]{6,8}\b",
+        "intent": Intent(
+            name="powershell_deny",
+            resources=[],
+            data_queries=[],
+        ),
+    },
+    # Request to investigate a host with PowerShell — broad matching
+    {
+        "pattern": r"\b(run\s+powershell|execute\s+(on|command)|check\s+(the\s+)?(processes?|services?|connections?|tasks?|logs?|event\s*log|registry|software|startup|running).{0,30}(on|for)\s+\w|investigate\s+(host|machine|desktop|server|workstation)|remote\s+(command|shell|execute)|winrm|get-process|get-service|get-eventlog|get-nettcpconnection|get-scheduledtask|what('s| is) running on|processes?\s+(on|running)|check\s+\w+.{0,10}(machine|host|desktop|server|workstation))\b",
+        "intent": Intent(
+            name="powershell_propose",
+            resources=[("powershell-execute", "execute")],
+            data_queries=[{"routing_key": "powershell.command.propose", "type": "powershell-propose"}],
         ),
     },
 ]
@@ -243,8 +428,18 @@ class ResolverService(BaseService):
     """
 
     def on_startup(self) -> None:
-        """No special startup needed — uses NeuroKit clients."""
-        logger.info("Resolver ready — RBAC enforcement active")
+        """Load LLM classifier API key for hybrid intent detection."""
+        self._llm_api_key = None
+        try:
+            anthropic_secrets = self.secrets.get_all("anthropic")
+            self._llm_api_key = anthropic_secrets.get("api_key", "")
+            if self._llm_api_key:
+                logger.info("Resolver ready — RBAC enforcement active, LLM fallback classifier enabled")
+            else:
+                logger.info("Resolver ready — RBAC enforcement active, LLM fallback disabled (no API key)")
+        except Exception as e:
+            logger.warning("Could not load Anthropic API key for LLM classifier: %s", e)
+            logger.info("Resolver ready — RBAC enforcement active, regex-only classification")
 
     def setup_queues(self) -> None:
         """Set up inbound queue for user queries."""
@@ -264,6 +459,9 @@ class ResolverService(BaseService):
                 "wazuh-infra.response.*",
                 "email.response.*",
                 "scheduler.response.*",
+                "zendesk.response.*",
+                "powershell.response.*",
+                "meraki.response.*",
             ],
         )
         self.rmq.consume(self.data_responses, self._handle_data_response)
@@ -324,8 +522,9 @@ class ResolverService(BaseService):
                 logger.warning("Could not enrich identity for %s: %s", actor.user_id, e)
 
         if not actor.roles:
-            self._deny(envelope, "No roles assigned to your account. Please contact your administrator.")
-            return
+            # Everyone can talk to Kevin — default to general-user for security awareness
+            actor.roles = ["general-user"]
+            logger.info("No roles for %s, defaulting to general-user", actor.email)
 
         # ── Step 2: Classify intent ─────────────────────────────────
         intent = self._classify_intent(text)
@@ -407,14 +606,106 @@ class ResolverService(BaseService):
         """
         Classify user intent from message text.
 
-        Uses keyword matching for now. In production, the Agent Router
-        could use an LLM for more sophisticated classification.
+        Hybrid approach:
+        1. Try regex patterns first (instant, no cost)
+        2. If regex returns 'general', use Haiku LLM as fallback classifier
         """
         text_lower = text.lower()
+
+        # Step 1: Regex matching
         for entry in INTENT_PATTERNS:
             if re.search(entry["pattern"], text_lower):
                 return entry["intent"]
+
+        # Step 2: LLM fallback for ambiguous messages
+        if self._llm_api_key:
+            llm_intent = self._classify_with_llm(text)
+            if llm_intent:
+                return llm_intent
+
         return DEFAULT_INTENT
+
+    def _classify_with_llm(self, text: str) -> Optional[Intent]:
+        """
+        Use Haiku to classify intent when regex fails.
+        Returns an Intent or None if classification fails or returns general.
+        """
+        import httpx
+
+        # Build intent catalog for the LLM
+        intent_names = sorted(set(e["intent"].name for e in INTENT_PATTERNS))
+        intent_list = "\n".join(f"- {name}" for name in intent_names)
+
+        prompt = f"""Classify this user message into exactly ONE intent. Respond with ONLY the intent name, nothing else.
+
+Available intents:
+{intent_list}
+- general (use ONLY if the message is truly general conversation with no data/action need)
+
+Rules:
+- If the message asks about tickets, ZenDesk, issues, or helpdesk → use a zendesk_* intent
+- If the message asks about alerts, security events, SIEM, Wazuh → use an alert_* or wazuh_* intent
+- If the message asks about network devices, switches, APs, VLANs, DHCP, clients, Meraki, what's connected, uplinks, WAN → use a meraki_* intent
+- If the message asks about users, accounts, sign-ins, MFA → use an entra_* intent
+- If the message asks to send/compose email → use email_send
+- If the message asks about email inbox/messages → use email_list or email_search_*
+- If the message asks about a specific host/computer/endpoint → use host_lookup or host_investigation
+- If the message asks to create a ticket → use zendesk_create
+- If the message asks to run a command on a machine → use powershell_run
+- Only use 'general' for greetings, chitchat, or questions about Kevin/policies/security advice
+
+User message: {text}
+
+Intent:"""
+
+        try:
+            resp = httpx.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": self._llm_api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 30,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=3.0,  # Hard timeout — don't slow down the pipeline
+            )
+
+            if resp.status_code != 200:
+                logger.warning("LLM classifier HTTP %s: %s", resp.status_code, resp.text[:200])
+                return None
+
+            result = resp.json()
+            intent_name = result["content"][0]["text"].strip().lower().replace(" ", "_")
+
+            # Clean up common LLM quirks
+            intent_name = intent_name.strip(".-_*`'\"")
+
+            if intent_name == "general":
+                logger.info("LLM classifier confirmed: general")
+                return None
+
+            # Look up the intent by name
+            for entry in INTENT_PATTERNS:
+                if entry["intent"].name == intent_name:
+                    logger.info(
+                        "LLM classifier rescued: '%s' → %s (regex missed)",
+                        text[:50], intent_name
+                    )
+                    return entry["intent"]
+
+            logger.warning("LLM classifier returned unknown intent: %s", intent_name)
+            return None
+
+        except httpx.TimeoutException:
+            logger.warning("LLM classifier timed out (3s)")
+            return None
+        except Exception as e:
+            logger.warning("LLM classifier error: %s", e)
+            return None
 
     def _fetch_data_and_forward(
         self, envelope: MessageEnvelope, intent: Intent
@@ -430,6 +721,15 @@ class ResolverService(BaseService):
             "intent": intent.name,
             "requested_data": [],
         }
+
+        # Special handling: PowerShell approve — extract request_id from user text
+        if intent.name == "powershell_approve":
+            import re
+            text = envelope.payload.get("text", "")
+            match = re.search(r'\b([a-f0-9]{6,8})\b', text.lower())
+            if match:
+                envelope.payload["request_id"] = match.group(1)
+                logger.info("PowerShell approve: request_id=%s", match.group(1))
 
         for query in intent.data_queries:
             # Create a child message to the appropriate connector
@@ -466,13 +766,16 @@ class ResolverService(BaseService):
         }
 
     def _check_pending_timeouts(self) -> None:
-        """Forward any pending requests that have timed out (10s)."""
+        """Forward any pending requests that have timed out."""
         now = time.time()
         timed_out = []
 
         for corr_id, pending in self._pending_data.items():
             age = now - pending["created_at"]
-            if age > 10:  # 10 second timeout
+            # PowerShell commands need longer timeout (WinRM round trip)
+            intent_name = pending.get("intent", DEFAULT_INTENT).name if pending.get("intent") else ""
+            timeout = 60 if "powershell" in intent_name else 10
+            if age > timeout:
                 timed_out.append(corr_id)
 
         for corr_id in timed_out:
