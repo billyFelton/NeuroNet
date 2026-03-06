@@ -243,6 +243,7 @@ services:
       WAZUH_VAULT_SECRET: wazuh
       WAZUH_ROUTING_PREFIX: wazuh
       WAZUH_INSTANCE_LABEL: desktops
+      WAZUH_CACHE_TTL: 600 
     networks:
       - neuro-network
 
@@ -275,6 +276,7 @@ services:
       WAZUH_VAULT_SECRET: wazuh-infra
       WAZUH_ROUTING_PREFIX: wazuh-infra
       WAZUH_INSTANCE_LABEL: infrastructure
+      WAZUH_CACHE_TTL: 600
     networks:
       - neuro-network
 

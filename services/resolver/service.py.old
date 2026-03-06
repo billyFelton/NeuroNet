@@ -52,11 +52,6 @@ class Intent:
 # Intent patterns — maps user query keywords to required resources.
 # In production, the Agent Router or an LLM classifier would handle this.
 # For now, keyword matching gets us a working loop.
-#
-# data_queries now support an optional "default_payload" dict that gets
-# merged into the outbound message payload. This lets us pass sensible
-# filter defaults (severity, limit, time_range) to connectors so they
-# don't just return the 50 most recent events with no filtering.
 INTENT_PATTERNS = [
     # ── Scheduler (most specific — must be checked before broad patterns) ──
     # Scheduler — modify (enable/disable/change schedule)
@@ -87,29 +82,13 @@ INTENT_PATTERNS = [
         ),
     },
     # ── Security / Wazuh ──
-    # Security summary / posture / counts (must match BEFORE individual alert patterns)
-    {
-        "pattern": r"\b(alerts?\s+count|alerts?\s+summary|security\s+(summary|overview|posture|status|report|dashboard)|by\s+severity|severity\s+(breakdown|count|summary|distribution|stats)|how\s+many\s+(alerts?|threats?|security\s+events?)|total\s+alerts?|overall\s+(security|alert)|24\s*h(our)?\s+(summary|alerts?|count|report))\b",
-        "intent": Intent(
-            name="security_summary",
-            resources=[("wazuh-alerts", "query")],
-            data_queries=[
-                {"routing_key": "wazuh.query.summary", "type": "desktop-summary"},
-                {"routing_key": "wazuh-infra.query.summary", "type": "infra-summary"},
-            ],
-        ),
-    },
     # Infrastructure-specific
     {
         "pattern": r"\b(infra(structure)?\s+(alert|alerts|agent|agents|vuln|siem)|server\s+(alert|alerts|agent|agents)|wazuh.infra)\b",
         "intent": Intent(
             name="infra_alerts",
             resources=[("wazuh-alerts", "query")],
-            data_queries=[{
-                "routing_key": "wazuh-infra.query.alerts",
-                "type": "infra-alerts",
-                "default_payload": {"severity": "medium"},
-            }],
+            data_queries=[{"routing_key": "wazuh-infra.query.alerts", "type": "infra-alerts"}],
         ),
     },
     # Desktop-specific
@@ -118,11 +97,7 @@ INTENT_PATTERNS = [
         "intent": Intent(
             name="desktop_alerts",
             resources=[("wazuh-alerts", "query")],
-            data_queries=[{
-                "routing_key": "wazuh.query.alerts",
-                "type": "desktop-alerts",
-                "default_payload": {"severity": "medium"},
-            }],
+            data_queries=[{"routing_key": "wazuh.query.alerts", "type": "desktop-alerts"}],
         ),
     },
     # Generic (queries BOTH instances)
@@ -132,16 +107,8 @@ INTENT_PATTERNS = [
             name="security_alerts",
             resources=[("wazuh-alerts", "query")],
             data_queries=[
-                {
-                    "routing_key": "wazuh.query.alerts",
-                    "type": "desktop-alerts",
-                    "default_payload": {"severity": "medium"},
-                },
-                {
-                    "routing_key": "wazuh-infra.query.alerts",
-                    "type": "infra-alerts",
-                    "default_payload": {"severity": "medium"},
-                },
+                {"routing_key": "wazuh.query.alerts", "type": "desktop-alerts"},
+                {"routing_key": "wazuh-infra.query.alerts", "type": "infra-alerts"},
             ],
         ),
     },
@@ -157,7 +124,7 @@ INTENT_PATTERNS = [
         ),
     },
     {
-        "pattern": r"\b(agent|agents|endpoint|endpoints|wazuh\s+agent|laptop|laptops|workstation|workstations)\b",
+        "pattern": r"\b(agent|agents|endpoint|wazuh\s+agent)\b",
         "intent": Intent(
             name="agent_status",
             resources=[("wazuh-agents", "query")],
@@ -190,16 +157,8 @@ INTENT_PATTERNS = [
             data_queries=[
                 {"routing_key": "wazuh.query.agents", "type": "desktop-agents"},
                 {"routing_key": "wazuh-infra.query.agents", "type": "infra-agents"},
-                {
-                    "routing_key": "wazuh.query.alerts",
-                    "type": "desktop-alerts",
-                    "default_payload": {"severity": "medium"},
-                },
-                {
-                    "routing_key": "wazuh-infra.query.alerts",
-                    "type": "infra-alerts",
-                    "default_payload": {"severity": "medium"},
-                },
+                {"routing_key": "wazuh.query.alerts", "type": "desktop-alerts"},
+                {"routing_key": "wazuh-infra.query.alerts", "type": "infra-alerts"},
             ],
         ),
     },
@@ -245,7 +204,7 @@ INTENT_PATTERNS = [
         ),
     },
     {
-        "pattern": r"\b(enrolled\s+devices?|devices?\s+(are\s+)?enrolled|entra\s*id?\s+devices?|intune\s+devices?|managed\s+devices?|device\s+compliance|mdm\s+devices?)\b",
+        "pattern": r"\b(device|devices|laptop|workstation|enrolled)\b",
         "intent": Intent(
             name="device_query",
             resources=[("entra-users", "query")],
@@ -435,7 +394,7 @@ INTENT_PATTERNS = [
             data_queries=[{"routing_key": "powershell.command.execute", "type": "powershell-exec"}],
         ),
     },
-    # Deny a pending PowerShell command
+    # Deny a pending PowerShell command  
     {
         "pattern": r"\bdeny\s+[a-f0-9]{6,8}\b",
         "intent": Intent(
@@ -754,10 +713,9 @@ Intent:"""
         """
         Send data queries to connectors, then forward to AI once data arrives.
 
-        Each data_query dict can include a "default_payload" that provides
-        sensible defaults (severity filters, limits, etc.) for the connector.
-        The user's original payload fields are overlaid on top, so explicit
-        user-provided values always win.
+        For simplicity in v1, we send the queries but also forward to AI
+        immediately with the intent metadata. The AI worker can wait for
+        data or respond based on what's available.
         """
         data_context = {
             "intent": intent.name,
@@ -774,22 +732,14 @@ Intent:"""
                 logger.info("PowerShell approve: request_id=%s", match.group(1))
 
         for query in intent.data_queries:
-            # Build the outbound payload:
-            # 1. Start with default_payload from the intent definition
-            # 2. Overlay the user's original payload (so explicit params win)
-            # 3. Add query_type metadata
-            default_payload = query.get("default_payload", {})
-            outbound_payload = {
-                **default_payload,
-                **envelope.payload,
-                "query_type": query["type"],
-            }
-
             # Create a child message to the appropriate connector
             child = envelope.create_child(
                 source=self.service_name,
                 message_type=query["routing_key"],
-                payload=outbound_payload,
+                payload={
+                    **envelope.payload,
+                    "query_type": query["type"],
+                },
             )
             # Set reply_to so the connector's response routes back via the exchange
             # e.g., "wazuh.query.alerts" → "wazuh.response.alerts"
