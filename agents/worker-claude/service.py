@@ -779,6 +779,15 @@ class ClaudeWorker(BaseService):
         )
         reply.ai_interaction = ai_context
 
+        # Carry forward debug trace from resolver
+        debug_trace = payload.get("_debug_trace", [])
+        debug_level = os.environ.get("CONVERSATION_DEBUG", "none").lower()
+
+        if debug_level != "none":
+            debug_trace.append(
+                f":robot_face: *Kevin:* model=`{model_used}` tokens={input_tokens}+{output_tokens} latency={latency_ms}ms cost=${cost_usd:.4f}"
+            )
+
         # Route back to the connector via the reply_to key
         reply_key = envelope.reply_to or "ai.response"
         self.rmq.publish(reply_key, reply)
@@ -786,6 +795,8 @@ class ClaudeWorker(BaseService):
         # Check if Kevin proposed a PowerShell command — store it via the connector
         try:
             self._check_powershell_proposal(response_text, envelope)
+            if debug_level == "debug" and "approve" in response_text.lower():
+                debug_trace.append(":computer: *Action:* PowerShell proposal stored")
         except Exception as e:
             logger.debug("PowerShell proposal check failed: %s", e)
 
@@ -794,6 +805,8 @@ class ClaudeWorker(BaseService):
             if intent in ("email_send",):
                 logger.info("Email send intent detected, checking response for email content...")
                 self._check_email_send(response_text, envelope)
+                if debug_level != "none":
+                    debug_trace.append(":email: *Action:* Email send dispatched to connector")
         except Exception as e:
             logger.error("Email send check failed: %s", e, exc_info=True)
 
@@ -802,11 +815,32 @@ class ClaudeWorker(BaseService):
             if intent in ("zendesk_create",):
                 logger.info("ZenDesk create intent detected, checking response for ticket content...")
                 self._check_zendesk_create(response_text, envelope)
+                if debug_level != "none":
+                    debug_trace.append(":ticket: *Action:* ZenDesk ticket creation dispatched")
             elif intent in ("zendesk_update", "zendesk_comment"):
                 logger.info("ZenDesk update/comment intent detected, checking response...")
                 self._check_zendesk_update(response_text, envelope, intent)
+                if debug_level != "none":
+                    debug_trace.append(":ticket: *Action:* ZenDesk update dispatched")
         except Exception as e:
             logger.error("ZenDesk check failed: %s", e, exc_info=True)
+
+        # Publish debug trace as a separate message to the same channel
+        if debug_trace and debug_level != "none":
+            channel = payload.get("channel")
+            thread_ts = payload.get("thread_ts")
+            if channel:
+                debug_msg = envelope.create_reply(
+                    source=self.service_name,
+                    message_type="ai.debug",
+                    payload={
+                        "text": "\n".join(debug_trace),
+                        "channel": channel,
+                        "thread_ts": thread_ts,
+                        "_is_debug": True,
+                    },
+                )
+                self.rmq.publish(reply_key, debug_msg)
 
         # Extract and store knowledge from the conversation (async, non-blocking)
         try:

@@ -533,6 +533,14 @@ class SlackConnector(BaseService):
         else:
             self._post_message(channel, thread_ts, response_text)
 
+        # Post debug trace if present (threaded, formatted as code block)
+        debug_trace = envelope.payload.get("_debug_trace", "")
+        if debug_trace:
+            debug_text = f"```\n{debug_trace}\n```"
+            if len(debug_text) > 3900:
+                debug_text = debug_text[:3897] + "```"
+            self._post_message(channel, thread_ts, debug_text)
+
         # Remove the "eyes" reaction and add a checkmark
         try:
             self._web_client.reactions_remove(

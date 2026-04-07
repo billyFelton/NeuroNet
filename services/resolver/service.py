@@ -18,6 +18,7 @@ Message Flow:
 """
 
 import logging
+import os
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -52,11 +53,6 @@ class Intent:
 # Intent patterns — maps user query keywords to required resources.
 # In production, the Agent Router or an LLM classifier would handle this.
 # For now, keyword matching gets us a working loop.
-#
-# data_queries now support an optional "default_payload" dict that gets
-# merged into the outbound message payload. This lets us pass sensible
-# filter defaults (severity, limit, time_range) to connectors so they
-# don't just return the 50 most recent events with no filtering.
 INTENT_PATTERNS = [
     # ── Scheduler (most specific — must be checked before broad patterns) ──
     # Scheduler — modify (enable/disable/change schedule)
@@ -87,29 +83,13 @@ INTENT_PATTERNS = [
         ),
     },
     # ── Security / Wazuh ──
-    # Security summary / posture / counts (must match BEFORE individual alert patterns)
-    {
-        "pattern": r"\b(alerts?\s+count|alerts?\s+summary|security\s+(summary|overview|posture|status|report|dashboard)|by\s+severity|severity\s+(breakdown|count|summary|distribution|stats)|how\s+many\s+(alerts?|threats?|security\s+events?)|total\s+alerts?|overall\s+(security|alert)|24\s*h(our)?\s+(summary|alerts?|count|report))\b",
-        "intent": Intent(
-            name="security_summary",
-            resources=[("wazuh-alerts", "query")],
-            data_queries=[
-                {"routing_key": "wazuh.query.summary", "type": "desktop-summary"},
-                {"routing_key": "wazuh-infra.query.summary", "type": "infra-summary"},
-            ],
-        ),
-    },
     # Infrastructure-specific
     {
         "pattern": r"\b(infra(structure)?\s+(alert|alerts|agent|agents|vuln|siem)|server\s+(alert|alerts|agent|agents)|wazuh.infra)\b",
         "intent": Intent(
             name="infra_alerts",
             resources=[("wazuh-alerts", "query")],
-            data_queries=[{
-                "routing_key": "wazuh-infra.query.alerts",
-                "type": "infra-alerts",
-                "default_payload": {"severity": "medium"},
-            }],
+            data_queries=[{"routing_key": "wazuh-infra.query.alerts", "type": "infra-alerts"}],
         ),
     },
     # Desktop-specific
@@ -118,11 +98,7 @@ INTENT_PATTERNS = [
         "intent": Intent(
             name="desktop_alerts",
             resources=[("wazuh-alerts", "query")],
-            data_queries=[{
-                "routing_key": "wazuh.query.alerts",
-                "type": "desktop-alerts",
-                "default_payload": {"severity": "medium"},
-            }],
+            data_queries=[{"routing_key": "wazuh.query.alerts", "type": "desktop-alerts"}],
         ),
     },
     # Generic (queries BOTH instances)
@@ -132,16 +108,8 @@ INTENT_PATTERNS = [
             name="security_alerts",
             resources=[("wazuh-alerts", "query")],
             data_queries=[
-                {
-                    "routing_key": "wazuh.query.alerts",
-                    "type": "desktop-alerts",
-                    "default_payload": {"severity": "medium"},
-                },
-                {
-                    "routing_key": "wazuh-infra.query.alerts",
-                    "type": "infra-alerts",
-                    "default_payload": {"severity": "medium"},
-                },
+                {"routing_key": "wazuh.query.alerts", "type": "desktop-alerts"},
+                {"routing_key": "wazuh-infra.query.alerts", "type": "infra-alerts"},
             ],
         ),
     },
@@ -157,7 +125,7 @@ INTENT_PATTERNS = [
         ),
     },
     {
-        "pattern": r"\b(agent|agents|endpoint|endpoints|wazuh\s+agent|laptop|laptops|workstation|workstations)\b",
+        "pattern": r"\b(agent|agents|endpoint|wazuh\s+agent)\b",
         "intent": Intent(
             name="agent_status",
             resources=[("wazuh-agents", "query")],
@@ -190,16 +158,8 @@ INTENT_PATTERNS = [
             data_queries=[
                 {"routing_key": "wazuh.query.agents", "type": "desktop-agents"},
                 {"routing_key": "wazuh-infra.query.agents", "type": "infra-agents"},
-                {
-                    "routing_key": "wazuh.query.alerts",
-                    "type": "desktop-alerts",
-                    "default_payload": {"severity": "medium"},
-                },
-                {
-                    "routing_key": "wazuh-infra.query.alerts",
-                    "type": "infra-alerts",
-                    "default_payload": {"severity": "medium"},
-                },
+                {"routing_key": "wazuh.query.alerts", "type": "desktop-alerts"},
+                {"routing_key": "wazuh-infra.query.alerts", "type": "infra-alerts"},
             ],
         ),
     },
@@ -245,7 +205,7 @@ INTENT_PATTERNS = [
         ),
     },
     {
-        "pattern": r"\b(enrolled\s+devices?|devices?\s+(are\s+)?enrolled|entra\s*id?\s+devices?|intune\s+devices?|managed\s+devices?|device\s+compliance|mdm\s+devices?)\b",
+        "pattern": r"\b(device|devices|laptop|workstation|enrolled)\b",
         "intent": Intent(
             name="device_query",
             resources=[("entra-users", "query")],
@@ -379,6 +339,15 @@ INTENT_PATTERNS = [
             data_queries=[{"routing_key": "meraki.query.uplinks", "type": "meraki-uplinks"}],
         ),
     },
+    # Security events (IDS/IPS, malware, content filtering)
+    {
+        "pattern": r"\b(meraki\s+(security|ids|ips|intrusion|malware|threats?)|security\s+events?|ids\s+(alerts?|events?|alarms?)|ips\s+(alerts?|events?)|intrusion\s+(detect|prevent|alerts?|events?)|malware\s+(events?|detect|block)|blocked\s+(threats?|files?|urls?)|threat\s+detection)\b",
+        "intent": Intent(
+            name="meraki_security_events",
+            resources=[("meraki", "query")],
+            data_queries=[{"routing_key": "meraki.query.security_events", "type": "meraki-security"}],
+        ),
+    },
     # Email — send (must come AFTER ZenDesk and Meraki patterns)
     # NOTE: No data_queries — the AI worker composes the email and posts to connector
     {
@@ -435,7 +404,7 @@ INTENT_PATTERNS = [
             data_queries=[{"routing_key": "powershell.command.execute", "type": "powershell-exec"}],
         ),
     },
-    # Deny a pending PowerShell command
+    # Deny a pending PowerShell command  
     {
         "pattern": r"\bdeny\s+[a-f0-9]{6,8}\b",
         "intent": Intent(
@@ -471,6 +440,14 @@ class ResolverService(BaseService):
     def on_startup(self) -> None:
         """Load LLM classifier API key for hybrid intent detection."""
         self._llm_api_key = None
+
+        # Debug level: none, minimal, debug
+        self._debug_level = os.environ.get("CONVERSATION_DEBUG", "none").lower()
+        if self._debug_level not in ("none", "minimal", "debug"):
+            self._debug_level = "none"
+        if self._debug_level != "none":
+            logger.info("Conversation debug level: %s", self._debug_level)
+
         try:
             anthropic_secrets = self.secrets.get_all("anthropic")
             self._llm_api_key = anthropic_secrets.get("api_key", "")
@@ -574,6 +551,13 @@ class ResolverService(BaseService):
             actor.email, intent.name, actor.roles, text,
         )
 
+        # ── Debug trace ──────────────────────────────────────────────
+        debug_trace = []
+        if self._debug_level != "none":
+            debug_trace.append(
+                f":mag: *Intent:* `{intent.name}` | *Roles:* {', '.join(actor.roles)}"
+            )
+
         # ── Step 3: RBAC check ──────────────────────────────────────
         if intent.resources:
             denied_resources = []
@@ -596,6 +580,14 @@ class ResolverService(BaseService):
                     denied_resources.append((resource, action, {
                         "denied_reason": f"RBAC check error: {e}"
                     }))
+
+            # Debug: RBAC decisions
+            if self._debug_level != "none":
+                for resource, action, result in granted_resources:
+                    debug_trace.append(f":white_check_mark: *RBAC:* `{resource}/{action}` → permit")
+                for resource, action, result in denied_resources:
+                    reason = result.get("denied_reason", "no matching policy")
+                    debug_trace.append(f":x: *RBAC:* `{resource}/{action}` → deny ({reason})")
 
             # Log all authorization decisions
             for resource, action, result in granted_resources + denied_resources:
@@ -637,7 +629,14 @@ class ResolverService(BaseService):
             )
 
         # ── Step 4: Fetch data or forward directly ──────────────────
+        # Attach debug trace to envelope payload for downstream services
+        if debug_trace:
+            envelope.payload["_debug_trace"] = debug_trace
+
         if intent.data_queries:
+            if self._debug_level == "debug":
+                query_names = [q["type"] for q in intent.data_queries]
+                debug_trace.append(f":satellite: *Data queries:* {', '.join(query_names)}")
             self._fetch_data_and_forward(envelope, intent)
         else:
             # General conversation — forward directly to AI
@@ -754,10 +753,9 @@ Intent:"""
         """
         Send data queries to connectors, then forward to AI once data arrives.
 
-        Each data_query dict can include a "default_payload" that provides
-        sensible defaults (severity filters, limits, etc.) for the connector.
-        The user's original payload fields are overlaid on top, so explicit
-        user-provided values always win.
+        For simplicity in v1, we send the queries but also forward to AI
+        immediately with the intent metadata. The AI worker can wait for
+        data or respond based on what's available.
         """
         data_context = {
             "intent": intent.name,
@@ -774,22 +772,14 @@ Intent:"""
                 logger.info("PowerShell approve: request_id=%s", match.group(1))
 
         for query in intent.data_queries:
-            # Build the outbound payload:
-            # 1. Start with default_payload from the intent definition
-            # 2. Overlay the user's original payload (so explicit params win)
-            # 3. Add query_type metadata
-            default_payload = query.get("default_payload", {})
-            outbound_payload = {
-                **default_payload,
-                **envelope.payload,
-                "query_type": query["type"],
-            }
-
             # Create a child message to the appropriate connector
             child = envelope.create_child(
                 source=self.service_name,
                 message_type=query["routing_key"],
-                payload=outbound_payload,
+                payload={
+                    **envelope.payload,
+                    "query_type": query["type"],
+                },
             )
             # Set reply_to so the connector's response routes back via the exchange
             # e.g., "wazuh.query.alerts" → "wazuh.response.alerts"
@@ -864,6 +854,15 @@ Intent:"""
         pending["data"][msg_type] = envelope.payload
         pending["received_responses"] += 1
 
+        # Debug: connector response received
+        if self._debug_level == "debug":
+            original = pending["original_envelope"]
+            debug_trace = original.payload.get("_debug_trace", [])
+            result_count = len(envelope.payload) if isinstance(envelope.payload, (list, dict)) else 0
+            debug_trace.append(
+                f":inbox_tray: *Response:* `{msg_type}` ({pending['received_responses']}/{pending['expected_responses']})"
+            )
+
         # Check if all data has arrived
         if pending["received_responses"] >= pending["expected_responses"]:
             original = pending["original_envelope"]
@@ -889,6 +888,7 @@ Intent:"""
                 "data_context": data_context,
                 "channel": envelope.payload.get("channel"),
                 "thread_ts": envelope.payload.get("thread_ts"),
+                "_debug_trace": envelope.payload.get("_debug_trace", []),
             },
         )
 

@@ -155,6 +155,7 @@ services:
       HCVAULT_SECRET_ID: ${RESOLVER_SECRET_ID:-}
       VAULT_IAM_URL: http://vault-iam:8080
       VAULT_IAM_SERVICE_TOKEN: ${VAULT_IAM_MASTER_SERVICE_TOKEN:-}
+      CONVERSATION_DEBUG: ${CONVERSATION_DEBUG:-none}
     networks:
       - neuro-network
 
@@ -504,6 +505,7 @@ services:
       KB_DB_USER: vault_iam
       KB_DB_PASSWORD: ${VAULT_IAM_DB_PASSWORD}
       KB_DB_NAME: neuro_vault
+      CONVERSATION_DEBUG: ${CONVERSATION_DEBUG:-none}
     networks:
       - neuro-network
 
