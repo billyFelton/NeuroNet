@@ -49,7 +49,6 @@ class SlackConnector(BaseService):
         # Slack clients — initialized in on_startup
         self._socket_client = None   # SocketModeClient
         self._web_client = None      # WebClient (user token)
-        self._bot_client = None      # WebClient (bot token, for DMs)
         self._bot_user_id: str = ""  # The agent's Slack user ID
         self._bot_user_name: str = ""
 
@@ -77,15 +76,9 @@ class SlackConnector(BaseService):
         slack_secrets = self.secrets.get_all("slack")
         user_token = slack_secrets["user_token"]          # xoxp-...
         app_token = slack_secrets["app_level_token"]       # xapp-...
-        bot_token = slack_secrets.get("bot_token", "")     # xoxb-... (for DMs)
 
         # WebClient with USER token — this is what makes us appear as a real user
         self._web_client = WebClient(token=user_token)
-
-        # Bot client for DM operations (bot token can open DM channels)
-        self._bot_client = WebClient(token=bot_token) if bot_token else None
-        if self._bot_client:
-            logger.info("Bot client initialized for DM operations")
 
         # Verify identity
         auth_response = self._web_client.auth_test()
@@ -139,13 +132,6 @@ class SlackConnector(BaseService):
             routing_keys=["notification.slack", "alert.slack.*"],
         )
         self.rmq.consume(self.notification_queue, self._handle_notification)
-
-        # Queue for commands (DM, channel post, etc.)
-        self.command_queue = self.rmq.declare_queue(
-            "connector-slack.commands",
-            routing_keys=["slack.command.dm", "slack.command.post"],
-        )
-        self.rmq.consume(self.command_queue, self._handle_command)
 
     def run(self) -> None:
         """Override run to handle both Socket Mode and RabbitMQ consumption."""
@@ -479,10 +465,6 @@ class SlackConnector(BaseService):
                 "user_id": user_id,
                 "timestamp": time.time(),
             }
-            logger.info(
-                "Stored pending: corr=%s, pending_count=%d",
-                envelope.correlation_id, len(self._pending_responses),
-            )
 
         # Mark thread as active
         with self._active_threads_lock:
@@ -515,12 +497,15 @@ class SlackConnector(BaseService):
         """Handle AI responses from the network and post to Slack."""
         correlation_id = envelope.correlation_id
 
+        # Find the original Slack context
         with self._pending_lock:
-            slack_ctx = self._pending_responses.get(correlation_id)
+            slack_ctx = self._pending_responses.pop(correlation_id, None)
 
         if not slack_ctx:
-            # Likely a duplicate response (debug trace, knowledge extraction, etc.)
-            logger.debug("Duplicate response for correlation_id: %s (already handled)", correlation_id)
+            logger.warning(
+                "Received response for unknown correlation_id: %s",
+                correlation_id,
+            )
             return
 
         channel = slack_ctx["channel"]
@@ -548,14 +533,6 @@ class SlackConnector(BaseService):
         else:
             self._post_message(channel, thread_ts, response_text)
 
-        # Post debug trace if present (threaded, formatted as code block)
-        debug_trace = envelope.payload.get("_debug_trace", "")
-        if debug_trace:
-            debug_text = f"```\n{debug_trace}\n```"
-            if len(debug_text) > 3900:
-                debug_text = debug_text[:3897] + "```"
-            self._post_message(channel, thread_ts, debug_text)
-
         # Remove the "eyes" reaction and add a checkmark
         try:
             self._web_client.reactions_remove(
@@ -570,18 +547,6 @@ class SlackConnector(BaseService):
             )
         except Exception:
             pass
-
-        # Pop the pending context now that we've handled it
-        with self._pending_lock:
-            self._pending_responses.pop(correlation_id, None)
-
-            # Clean up stale pending responses (older than 5 minutes)
-            stale = [k for k, v in self._pending_responses.items()
-                     if time.time() - v.get("timestamp", 0) > 300]
-            for k in stale:
-                self._pending_responses.pop(k, None)
-            if stale:
-                logger.info("Cleaned up %d stale pending responses", len(stale))
 
         # Audit the outbound response
         self.audit.log_from_envelope(
@@ -606,161 +571,6 @@ class SlackConnector(BaseService):
             return
 
         self._post_message(channel, thread_ts, text)
-
-    def _handle_command(self, envelope: MessageEnvelope) -> Optional[MessageEnvelope]:
-        """Handle commands: DM a user, post to a channel, etc."""
-        msg_type = envelope.message_type
-        payload = envelope.payload
-
-        if msg_type == "slack.command.dm":
-            return self._handle_dm_command(payload, envelope)
-        elif msg_type == "slack.command.post":
-            return self._handle_post_command(payload, envelope)
-        else:
-            logger.warning("Unknown Slack command: %s", msg_type)
-            return envelope.create_reply(
-                source=self.service_name,
-                message_type="slack.response.error",
-                payload={"error": f"Unknown command: {msg_type}"},
-            )
-
-    def _handle_dm_command(
-        self, payload: Dict, envelope: MessageEnvelope
-    ) -> Optional[MessageEnvelope]:
-        """
-        Send a direct message to a user.
-
-        Payload:
-            - recipient_email: email address to look up Slack user
-            - recipient_slack_id: direct Slack user ID (if known)
-            - text: message to send
-        """
-        recipient_email = payload.get("recipient_email", "")
-        recipient_slack_id = payload.get("recipient_slack_id", "")
-        text = payload.get("text", "")
-
-        if not text:
-            return envelope.create_reply(
-                source=self.service_name,
-                message_type="slack.response.dm",
-                payload={"status": "error", "error": "No message text provided"},
-            )
-
-        # Try Kevin's user token first (DM appears from Kevin), fall back to bot
-        dm_client = self._web_client
-
-        # Resolve recipient to Slack user ID
-        slack_user_id = recipient_slack_id
-        if not slack_user_id and recipient_email:
-            slack_user_id = self._resolve_email_to_slack_id(recipient_email)
-
-        if not slack_user_id:
-            return envelope.create_reply(
-                source=self.service_name,
-                message_type="slack.response.dm",
-                payload={
-                    "status": "error",
-                    "error": f"Could not find Slack user for: {recipient_email or 'unknown'}",
-                },
-            )
-
-        # Open a DM channel — try user token first, fall back to bot token
-        dm_channel = None
-        for client, label in [(self._web_client, "user"), (self._bot_client, "bot")]:
-            if not client:
-                continue
-            try:
-                dm_result = client.conversations_open(users=[slack_user_id])
-                dm_channel = dm_result["channel"]["id"]
-                dm_client = client
-                logger.info("Opened DM channel %s via %s token", dm_channel, label)
-                break
-            except Exception as e:
-                logger.debug("DM open failed with %s token: %s", label, e)
-
-        if not dm_channel:
-            return envelope.create_reply(
-                source=self.service_name,
-                message_type="slack.response.dm",
-                payload={"status": "error", "error": f"Could not open DM with {recipient_email}"},
-            )
-
-        # Send the message
-        try:
-            result = dm_client.chat_postMessage(
-                channel=dm_channel,
-                text=text,
-                unfurl_links=False,
-                unfurl_media=False,
-            )
-            ts = result.get("ts")
-        except Exception as e:
-            logger.error("Failed to send DM to %s: %s", dm_channel, e)
-            ts = None
-
-        if ts:
-            logger.info(
-                "Sent DM to %s (channel %s): %.80s",
-                recipient_email or slack_user_id, dm_channel, text,
-            )
-            self.audit.log_from_envelope(
-                envelope=envelope,
-                event_type=EventType.DATA_ACCESS,
-                action="slack_dm_sent",
-                resource="slack-dm",
-                details={
-                    "recipient_email": recipient_email,
-                    "recipient_slack_id": slack_user_id,
-                    "dm_channel": dm_channel,
-                    "text_length": len(text),
-                },
-            )
-            return envelope.create_reply(
-                source=self.service_name,
-                message_type="slack.response.dm",
-                payload={
-                    "status": "sent",
-                    "recipient": recipient_email or slack_user_id,
-                    "channel": dm_channel,
-                },
-            )
-        else:
-            return envelope.create_reply(
-                source=self.service_name,
-                message_type="slack.response.dm",
-                payload={"status": "error", "error": "Failed to post DM"},
-            )
-
-    def _handle_post_command(
-        self, payload: Dict, envelope: MessageEnvelope
-    ) -> Optional[MessageEnvelope]:
-        """Post a message to a specific channel."""
-        channel = payload.get("channel", "")
-        text = payload.get("text", "")
-        thread_ts = payload.get("thread_ts")
-
-        if not channel or not text:
-            return envelope.create_reply(
-                source=self.service_name,
-                message_type="slack.response.post",
-                payload={"status": "error", "error": "Missing channel or text"},
-            )
-
-        ts = self._post_message(channel, thread_ts, text)
-        return envelope.create_reply(
-            source=self.service_name,
-            message_type="slack.response.post",
-            payload={"status": "sent" if ts else "error", "channel": channel},
-        )
-
-    def _resolve_email_to_slack_id(self, email: str) -> Optional[str]:
-        """Look up a Slack user ID by email."""
-        try:
-            result = self._web_client.users_lookupByEmail(email=email)
-            return result["user"]["id"]
-        except Exception as e:
-            logger.debug("Could not find Slack user for %s: %s", email, e)
-            return None
 
     # ── Slack API Helpers ───────────────────────────────────────────
 

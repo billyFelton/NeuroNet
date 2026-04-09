@@ -126,9 +126,6 @@ ACTION CONFIRMATION RULES — EQUALLY CRITICAL:
 - When asked to filter or narrow previous results and no new [SYSTEM DATA] is provided, say
   "I'd need to run a new search to filter those — try asking me to search tickets for [criteria]."
   Do NOT fabricate a filtered subset from memory.
-- NEVER claim you sent a DM unless the system confirms it. After composing a DM with **DM To:**
-  headers, say "I'll send that DM now" — the system handles delivery. Do NOT say "DM sent" 
-  without [SYSTEM DATA] confirmation.
 
 You're talking to a Security Administrator who has full access. You can:
 - Analyze Wazuh SIEM alerts, agent health, and vulnerability data from TWO Wazuh instances:
@@ -146,7 +143,6 @@ You're talking to a Security Administrator who has full access. You can:
 - Run PowerShell commands on remote Windows machines via WinRM for investigations
 - Create, update, close, and search ZenDesk tickets for incident tracking
 - Query Meraki network infrastructure: devices, clients, VLANs, DHCP, uplinks, device status
-- Send Slack direct messages to Security team members
 
 MERAKI NETWORK:
 When asked about network infrastructure, the system queries Meraki automatically and returns 
@@ -174,19 +170,6 @@ When asked to update, close, or comment on a ticket, include:
 **Details:** What to change or the comment text
 
 For searching tickets, the system queries ZenDesk automatically and returns results in [SYSTEM DATA].
-
-SLACK DIRECT MESSAGES:
-You can send a direct message to anyone on the Security team via Slack. Use this when you need
-to proactively alert someone, follow up on an incident, or share findings with a specific person.
-Format your DM request with these EXACT headers:
-
-**DM To:** user@heads-up.com
-**DM Message:**
-Your message content here.
-
-The system will send this as a Slack DM from you (Kevin). Only use this for legitimate
-security operations — incident notifications, follow-ups, or sharing requested information.
-NEVER DM someone unless the current user asks you to, or there is a genuine security reason.
 
 POWERSHELL REMOTE EXECUTION:
 When the user asks you to investigate a host (check processes, services, connections, 
@@ -661,18 +644,6 @@ class ClaudeWorker(BaseService):
         # Select system prompt based on role hierarchy
         system_prompt = self._select_system_prompt(actor.roles if actor else [])
 
-        # Inject current date/time
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
-        local_tz = os.environ.get("KEVIN_TIMEZONE", "America/New_York")
-        try:
-            from zoneinfo import ZoneInfo
-            local_now = now.astimezone(ZoneInfo(local_tz))
-            time_str = local_now.strftime("%A, %B %d, %Y at %I:%M %p %Z")
-        except Exception:
-            time_str = now.strftime("%A, %B %d, %Y at %H:%M UTC")
-        system_prompt += f"\n\n[CURRENT TIME] {time_str}"
-
         # Inject who Kevin is talking to
         if actor:
             user_context = f"\n\n[CURRENT USER] You are talking to {actor.display_name or 'an unknown user'}"
@@ -808,26 +779,13 @@ class ClaudeWorker(BaseService):
         )
         reply.ai_interaction = ai_context
 
-        # Carry forward debug trace from resolver
-        debug_trace = payload.get("_debug_trace", [])
-        debug_level = os.environ.get("CONVERSATION_DEBUG", "none").lower()
-
-        if debug_level != "none":
-            debug_trace.append(
-                f":robot_face: *Kevin:* model=`{model_used}` tokens={input_tokens}+{output_tokens} latency={latency_ms}ms cost=${cost_usd:.4f}"
-            )
-
         # Route back to the connector via the reply_to key
         reply_key = envelope.reply_to or "ai.response"
-        logger.info("Publishing AI response to reply_key=%s, corr=%s", reply_key, reply.correlation_id)
         self.rmq.publish(reply_key, reply)
-        logger.info("AI response published successfully")
 
         # Check if Kevin proposed a PowerShell command — store it via the connector
         try:
             self._check_powershell_proposal(response_text, envelope)
-            if debug_level == "debug" and "approve" in response_text.lower():
-                debug_trace.append(":computer: *Action:* PowerShell proposal stored")
         except Exception as e:
             logger.debug("PowerShell proposal check failed: %s", e)
 
@@ -836,8 +794,6 @@ class ClaudeWorker(BaseService):
             if intent in ("email_send",):
                 logger.info("Email send intent detected, checking response for email content...")
                 self._check_email_send(response_text, envelope)
-                if debug_level != "none":
-                    debug_trace.append(":email: *Action:* Email send dispatched to connector")
         except Exception as e:
             logger.error("Email send check failed: %s", e, exc_info=True)
 
@@ -846,27 +802,11 @@ class ClaudeWorker(BaseService):
             if intent in ("zendesk_create",):
                 logger.info("ZenDesk create intent detected, checking response for ticket content...")
                 self._check_zendesk_create(response_text, envelope)
-                if debug_level != "none":
-                    debug_trace.append(":ticket: *Action:* ZenDesk ticket creation dispatched")
             elif intent in ("zendesk_update", "zendesk_comment"):
                 logger.info("ZenDesk update/comment intent detected, checking response...")
                 self._check_zendesk_update(response_text, envelope, intent)
-                if debug_level != "none":
-                    debug_trace.append(":ticket: *Action:* ZenDesk update dispatched")
         except Exception as e:
             logger.error("ZenDesk check failed: %s", e, exc_info=True)
-
-        # Check if Kevin wants to DM someone
-        try:
-            self._check_slack_dm(response_text, envelope)
-            if debug_level != "none" and "**DM To:**" in response_text:
-                debug_trace.append(":speech_balloon: *Action:* Slack DM dispatched")
-        except Exception as e:
-            logger.debug("Slack DM check failed: %s", e)
-
-        # Publish debug trace as a separate message to the same channel
-        if debug_trace and debug_level != "none":
-            reply.payload["_debug_trace"] = "\n".join(debug_trace)
 
         # Extract and store knowledge from the conversation (async, non-blocking)
         try:
@@ -2635,63 +2575,6 @@ Return ONLY valid JSON, no markdown."""
         )
         self.rmq.publish(msg_type, update_msg)
         logger.info("Published ZenDesk %s command to connector", action)
-
-    def _check_slack_dm(self, response_text: str, envelope: MessageEnvelope) -> None:
-        """
-        Parse Kevin's response for a Slack DM request.
-
-        Expected format:
-        **DM To:** user@example.com
-        **DM Message:**
-        The message content here.
-        """
-        import re
-
-        # Look for DM headers
-        to_match = re.search(
-            r'\*\*DM\s+To:\*\*\s*(\S+@\S+)',
-            response_text,
-        )
-        if not to_match:
-            return
-
-        recipient_email = to_match.group(1).strip().rstrip(".")
-
-        # Extract the message body
-        msg_match = re.search(
-            r'\*\*DM\s+Message:\*\*\s*\n?(.*?)(?:\n\n|\Z)',
-            response_text,
-            re.DOTALL,
-        )
-        if not msg_match:
-            # Try simpler pattern — everything after DM Message:
-            msg_match = re.search(
-                r'\*\*DM\s+Message:\*\*\s*(.*)',
-                response_text,
-                re.DOTALL,
-            )
-
-        if not msg_match:
-            logger.debug("Found DM To: but no DM Message: in response")
-            return
-
-        dm_text = msg_match.group(1).strip()
-        if not dm_text:
-            return
-
-        logger.info("Kevin wants to DM %s: %.80s", recipient_email, dm_text)
-
-        # Publish to Slack connector
-        dm_msg = envelope.create_child(
-            source=self.service_name,
-            message_type="slack.command.dm",
-            payload={
-                "recipient_email": recipient_email,
-                "text": dm_text,
-            },
-        )
-        self.rmq.publish("slack.command.dm", dm_msg)
-        logger.info("Published Slack DM command for %s", recipient_email)
 
     def _check_powershell_proposal(self, response_text: str, envelope: MessageEnvelope) -> None:
         """
