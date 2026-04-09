@@ -348,7 +348,25 @@ INTENT_PATTERNS = [
             data_queries=[{"routing_key": "meraki.query.security_events", "type": "meraki-security"}],
         ),
     },
-    # Email — send (must come AFTER ZenDesk and Meraki patterns)
+    # M365 / Office 365 — list users, active accounts, mailboxes
+    {
+        "pattern": r"\b(list\s+(all\s+)?users?|all\s+(active\s+)?users?|active\s+(user|account|mailbox)|disabled\s+(user|account)|user\s+(list|inventory|report|count)|how\s+many\s+users?|office\s*365\s+users?|o365\s+users?|m365\s+users?|entra\s*id?\s+users?|mailbox\s+(list|inventory|count|report)|active\s+mailbox|licensed\s+users?|pull\s+(all\s+)?(active\s+)?(users?|accounts?|mailbox))\b",
+        "intent": Intent(
+            name="m365_active_users",
+            resources=[("email", "query")],
+            data_queries=[{"routing_key": "email.query.active-users", "type": "m365-users"}],
+        ),
+    },
+    # M365 — mailbox usage/storage report
+    {
+        "pattern": r"\b(mailbox\s+(usage|storage|size|space)|storage\s+report|mailbox\s+report|biggest\s+mailbox|largest\s+mailbox|email\s+storage|exchange\s+(usage|report|storage))\b",
+        "intent": Intent(
+            name="m365_mailbox_usage",
+            resources=[("email", "query")],
+            data_queries=[{"routing_key": "email.query.mailbox-usage", "type": "m365-mailbox-usage"}],
+        ),
+    },
+    # Email — send (must come AFTER ZenDesk, Meraki, and M365 patterns)
     # NOTE: No data_queries — the AI worker composes the email and posts to connector
     {
         "pattern": r"\b(send\s+(an?\s+)?(test\s+)?email|send\s+(a\s+)?(test\s+)?(message|notification|alert)\s+to|write\s+to\s+\S+@|compose|draft\s+(an?\s+)?email|send\s+\S+@|send\s+(it|that|this)\s+to|notify\s+\S+@|send\s+.{0,20}(to|email)|test\s+email)\b",
@@ -686,6 +704,8 @@ Rules:
 - If the message asks about tickets, ZenDesk, issues, or helpdesk → use a zendesk_* intent
 - If the message asks about alerts, security events, SIEM, Wazuh → use an alert_* or wazuh_* intent
 - If the message asks about network devices, switches, APs, VLANs, DHCP, clients, Meraki, what's connected, uplinks, WAN → use a meraki_* intent
+- If the message asks to list users, active accounts, mailboxes, licensed users, O365/M365 users, or user counts → use m365_active_users
+- If the message asks about mailbox storage, usage, size, or biggest mailboxes → use m365_mailbox_usage
 - If the message asks about users, accounts, sign-ins, MFA → use an entra_* intent
 - If the message asks to send/compose email → use email_send
 - If the message asks about email inbox/messages → use email_list or email_search_*

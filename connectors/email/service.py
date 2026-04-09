@@ -6,15 +6,16 @@ Manages Kevin's email inbox (kevin@heads-up.com):
 - Publishes new emails to RabbitMQ for AI processing
 - Handles send/reply commands from the AI worker
 - Marks emails as read after processing
+- Queries M365 active users and mailbox usage
 
 Uses Microsoft Graph API with application permissions:
-- Mail.Read, Mail.ReadWrite, Mail.Send
+- Mail.Read, Mail.ReadWrite, Mail.Send, User.Read.All
 """
 
 import logging
 import time
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -127,7 +128,12 @@ class EmailConnector(BaseService):
         """Make an authenticated request to Microsoft Graph."""
         self._ensure_authenticated()
         kwargs.setdefault("headers", {})["Authorization"] = f"Bearer {self._access_token}"
-        resp = self._http.request(method, f"{self.GRAPH_BASE}{path}", **kwargs)
+        # Handle full URLs (from pagination nextLink)
+        if path.startswith("http"):
+            url = path
+        else:
+            url = f"{self.GRAPH_BASE}{path}"
+        resp = self._http.request(method, url, **kwargs)
         resp.raise_for_status()
         if resp.status_code == 204:
             return {}
@@ -146,6 +152,8 @@ class EmailConnector(BaseService):
                 "email.command.read",
                 "email.command.search_mailbox",
                 "email.command.search_org",
+                "email.query.active-users",
+                "email.query.mailbox-usage",
             ],
         )
         self.rmq.consume(self.inbox, self.handle_message)
@@ -162,6 +170,8 @@ class EmailConnector(BaseService):
             "email.command.read": self._handle_read,
             "email.command.search_mailbox": self._handle_search_mailbox,
             "email.command.search_org": self._handle_search_org,
+            "email.query.active-users": self._handle_active_users,
+            "email.query.mailbox-usage": self._handle_mailbox_usage,
         }
 
         handler = handlers.get(msg_type)
@@ -186,9 +196,15 @@ class EmailConnector(BaseService):
             except Exception as audit_err:
                 logger.warning("Audit log failed (non-fatal): %s", audit_err)
 
+            # For query types, use query/response pattern
+            if ".query." in msg_type:
+                resp_type = msg_type.replace("query", "response")
+            else:
+                resp_type = msg_type.replace("command", "response")
+
             return envelope.create_reply(
                 source=self.service_name,
-                message_type=msg_type.replace("command", "response"),
+                message_type=resp_type,
                 payload=result,
             )
 
@@ -251,7 +267,7 @@ class EmailConnector(BaseService):
         for msg in messages:
             # Publish each email to RabbitMQ
             email_data = self._format_email(msg)
-            
+
             envelope = MessageEnvelope.create(
                 source=self.service_name,
                 message_type="email.incoming",
@@ -291,7 +307,6 @@ class EmailConnector(BaseService):
         body = msg.get("body", {})
         body_content = body.get("content", "")
         if body.get("contentType") == "html":
-            # Simple HTML tag stripping
             import re
             body_text = re.sub(r'<[^>]+>', '', body_content)
             body_text = re.sub(r'\s+', ' ', body_text).strip()
@@ -327,20 +342,12 @@ class EmailConnector(BaseService):
         """
         Send a new email from Kevin's mailbox.
 
-        Accepts either structured payload or natural language text:
-        Structured:
-        - to: list of email addresses (or single string)
-        - cc: optional list of CC addresses
-        - subject: email subject
-        - body: email body text
-        Natural language (in 'text' field):
-        - "Send an email to user@domain.com saying hello"
+        Accepts either structured payload or natural language text.
         """
         to_addrs = payload.get("to", [])
         subject = payload.get("subject", "")
         body = payload.get("body", "")
 
-        # If structured fields are missing, try to parse from natural language
         if not to_addrs and payload.get("text"):
             parsed = self._parse_send_text(payload["text"])
             to_addrs = parsed.get("to", [])
@@ -411,14 +418,7 @@ class EmailConnector(BaseService):
     def _handle_reply(
         self, payload: Dict[str, Any], envelope: MessageEnvelope
     ) -> Dict[str, Any]:
-        """
-        Reply to an existing email.
-
-        Payload:
-        - message_id: the Graph message ID to reply to
-        - body: reply text
-        - reply_all: bool (default: False)
-        """
+        """Reply to an existing email."""
         message_id = payload.get("message_id")
         body = payload.get("body", "")
         reply_all = payload.get("reply_all", False)
@@ -455,23 +455,13 @@ class EmailConnector(BaseService):
     def _handle_list(
         self, payload: Dict[str, Any], envelope: MessageEnvelope
     ) -> Dict[str, Any]:
-        """
-        List emails from Kevin's mailbox.
-
-        Payload:
-        - folder: "inbox", "sentitems", "drafts" (default: "inbox")
-        - unread_only: bool (default: False)
-        - from_email: filter by sender
-        - subject: filter by subject keyword
-        - limit: max results (default: 10)
-        """
+        """List emails from Kevin's mailbox."""
         folder = payload.get("folder", "inbox")
         unread_only = payload.get("unread_only", False)
         from_email = payload.get("from_email")
         subject_filter = payload.get("subject")
         limit = min(int(payload.get("limit", 10)), 50)
 
-        # Build filter
         filters = []
         if unread_only:
             filters.append("isRead eq false")
@@ -521,12 +511,7 @@ class EmailConnector(BaseService):
     def _handle_read(
         self, payload: Dict[str, Any], envelope: MessageEnvelope
     ) -> Dict[str, Any]:
-        """
-        Read the full content of a specific email.
-
-        Payload:
-        - message_id: the Graph message ID
-        """
+        """Read the full content of a specific email."""
         message_id = payload.get("message_id")
         if not message_id:
             return {"status": "error", "error": "Missing 'message_id'"}
@@ -544,30 +529,196 @@ class EmailConnector(BaseService):
             "email": self._format_email(data),
         }
 
+    # ── M365 User & Mailbox Queries ─────────────────────────────────
+
+    def _handle_active_users(
+        self, payload: Dict, envelope: MessageEnvelope
+    ) -> Dict[str, Any]:
+        """
+        List M365 users with license/account status from Graph API.
+
+        Filters based on natural language:
+        - active/enabled: accountEnabled eq true
+        - disabled: accountEnabled eq false
+        - all: no filter
+        """
+        text = payload.get("text", "").lower()
+
+        # Determine filter
+        filter_str = ""
+        if "disabled" in text or "inactive" in text:
+            filter_str = "accountEnabled eq false"
+        elif "active" in text or "enabled" in text:
+            filter_str = "accountEnabled eq true"
+
+        # Graph API limitations:
+        # - Cannot use $orderby with $filter on some property combinations
+        # - assignedPlans is a complex type that causes issues with $filter
+        # So we use basic select, filter, and sort client-side
+        params = {
+            "$select": "id,displayName,mail,userPrincipalName,jobTitle,department,"
+                       "accountEnabled,assignedLicenses,createdDateTime",
+            "$top": "999",
+        }
+        if filter_str:
+            params["$filter"] = filter_str
+
+        # Paginate through all users
+        all_users = []
+        path = "/users"
+        first_request = True
+        while path:
+            try:
+                if first_request:
+                    result = self._graph_request("GET", path, params=params)
+                    first_request = False
+                else:
+                    # Subsequent pages: nextLink is a full URL with params
+                    result = self._graph_request("GET", path)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 400 and first_request:
+                    # Retry without $orderby if present
+                    params.pop("$orderby", None)
+                    result = self._graph_request("GET", path, params=params)
+                    first_request = False
+                else:
+                    raise
+
+            all_users.extend(result.get("value", []))
+
+            # Handle pagination
+            next_link = result.get("@odata.nextLink", "")
+            if next_link:
+                path = next_link  # Full URL, _graph_request handles it
+            else:
+                path = None
+
+        # Format results
+        formatted = []
+        for u in all_users:
+            has_license = bool(u.get("assignedLicenses"))
+
+            formatted.append({
+                "name": u.get("displayName", ""),
+                "email": u.get("mail", ""),
+                "upn": u.get("userPrincipalName", ""),
+                "title": u.get("jobTitle", ""),
+                "department": u.get("department", ""),
+                "enabled": u.get("accountEnabled", False),
+                "has_license": has_license,
+                "license_count": len(u.get("assignedLicenses") or []),
+            })
+
+        # Sort by name client-side
+        formatted.sort(key=lambda u: (u.get("name") or "").lower())
+
+        active = sum(1 for u in formatted if u["enabled"])
+        disabled = sum(1 for u in formatted if not u["enabled"])
+        licensed = sum(1 for u in formatted if u["has_license"])
+        disabled_with_license = sum(
+            1 for u in formatted if not u["enabled"] and u["has_license"]
+        )
+
+        logger.info(
+            "M365 user query: %d total, %d active, %d disabled, %d licensed, %d disabled+licensed",
+            len(formatted), active, disabled, licensed, disabled_with_license,
+        )
+
+        return {
+            "status": "ok",
+            "count": len(formatted),
+            "active": active,
+            "disabled": disabled,
+            "licensed": licensed,
+            "disabled_with_license": disabled_with_license,
+            "users": formatted,
+        }
+
+    def _handle_mailbox_usage(
+        self, payload: Dict, envelope: MessageEnvelope
+    ) -> Dict[str, Any]:
+        """
+        Get mailbox usage details from M365 reports API.
+
+        Uses: GET /reports/getMailboxUsageDetail(period='D7')
+        Requires: Reports.Read.All permission
+        """
+        text = payload.get("text", "").lower()
+
+        # Determine period
+        period = "D7"  # Default: 7 days
+        if "30" in text or "month" in text:
+            period = "D30"
+        elif "90" in text or "quarter" in text:
+            period = "D90"
+        elif "180" in text or "half" in text:
+            period = "D180"
+
+        try:
+            # Reports API returns CSV, need to handle differently
+            self._ensure_authenticated()
+            headers = {"Authorization": f"Bearer {self._access_token}"}
+            resp = self._http.get(
+                f"{self.GRAPH_BASE}/reports/getMailboxUsageDetail(period='{period}')",
+                headers=headers,
+                follow_redirects=True,
+            )
+            resp.raise_for_status()
+
+            # Parse CSV response
+            import csv
+            import io
+            reader = csv.DictReader(io.StringIO(resp.text))
+            mailboxes = []
+            for row in reader:
+                mailboxes.append({
+                    "name": row.get("Display Name", ""),
+                    "upn": row.get("User Principal Name", ""),
+                    "storage_used_bytes": int(row.get("Storage Used (Byte)", 0) or 0),
+                    "storage_used_mb": round(int(row.get("Storage Used (Byte)", 0) or 0) / 1048576, 1),
+                    "item_count": int(row.get("Item Count", 0) or 0),
+                    "last_activity": row.get("Last Activity Date", ""),
+                    "has_archive": row.get("Has Archive", "").lower() == "true",
+                    "deleted_item_count": int(row.get("Deleted Item Count", 0) or 0),
+                })
+
+            # Sort by storage used descending
+            mailboxes.sort(key=lambda m: m["storage_used_bytes"], reverse=True)
+
+            total_storage = sum(m["storage_used_bytes"] for m in mailboxes)
+
+            logger.info("Mailbox usage report: %d mailboxes, %.1f GB total",
+                       len(mailboxes), total_storage / 1073741824)
+
+            return {
+                "status": "ok",
+                "period": period,
+                "count": len(mailboxes),
+                "total_storage_gb": round(total_storage / 1073741824, 2),
+                "mailboxes": mailboxes[:100],
+            }
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                return {
+                    "status": "error",
+                    "error": "Reports.Read.All permission required. Add this to the app registration in Azure AD.",
+                }
+            raise
+        except Exception as e:
+            logger.error("Mailbox usage report failed: %s", e)
+            return {"status": "error", "error": str(e)}
+
     # ── Search Specific Mailbox ──────────────────────────────────────
 
     def _handle_search_mailbox(
         self, payload: Dict[str, Any], envelope: MessageEnvelope
     ) -> Dict[str, Any]:
-        """
-        Search a specific user's mailbox.
-
-        Payload (structured or parsed from text):
-        - mailbox: user email address to search
-        - query: search terms (searches subject, body, sender)
-        - folder: "inbox", "sentitems", "all" (default: "all")
-        - from_email: filter by sender
-        - to_email: filter by recipient
-        - date_from: start date (ISO format or relative like "7d", "30d")
-        - date_to: end date
-        - has_attachments: bool filter
-        - limit: max results (default: 20)
-        """
+        """Search a specific user's mailbox."""
         mailbox = payload.get("mailbox", "")
         query = payload.get("query", "")
         text = payload.get("text", "")
 
-        # Parse from natural language if structured fields missing
         if not mailbox and text:
             parsed = self._parse_search_text(text)
             mailbox = parsed.get("mailbox", mailbox)
@@ -584,7 +735,6 @@ class EmailConnector(BaseService):
         has_attachments = payload.get("has_attachments")
         limit = min(int(payload.get("limit", 20)), 50)
 
-        # Build OData filter
         filters = []
         if from_email:
             filters.append(f"from/emailAddress/address eq '{from_email}'")
@@ -593,7 +743,6 @@ class EmailConnector(BaseService):
         if has_attachments is not None:
             filters.append(f"hasAttachments eq {str(has_attachments).lower()}")
 
-        # Handle relative dates
         if date_from:
             date_from = self._resolve_date(date_from)
             if date_from:
@@ -604,23 +753,18 @@ class EmailConnector(BaseService):
             "$select": "id,subject,from,toRecipients,ccRecipients,receivedDateTime,bodyPreview,isRead,importance,hasAttachments",
         }
 
-        # Use $search for keyword queries (searches subject, body, from)
-        # Note: Graph API does NOT allow $orderby with $search
         if query:
-            # Sanitize for Graph API — remove special chars, keep just keywords
             import re as _re
             clean_query = _re.sub(r"['\"\(\)\[\]{}]", "", query)
             clean_query = clean_query.strip()
             if clean_query:
                 params["$search"] = f'"{clean_query}"'
         else:
-            # Only add $orderby when not using $search
             params["$orderby"] = "receivedDateTime desc"
 
         if filters:
             params["$filter"] = " and ".join(filters)
 
-        # Determine folder path
         if folder == "all":
             path = f"/users/{mailbox}/messages"
         elif folder == "sentitems":
@@ -667,15 +811,7 @@ class EmailConnector(BaseService):
     def _handle_search_org(
         self, payload: Dict[str, Any], envelope: MessageEnvelope
     ) -> Dict[str, Any]:
-        """
-        Search across multiple mailboxes in the organization.
-
-        Payload:
-        - query: search terms (required)
-        - mailboxes: list of emails to search (default: searches all)
-        - date_from: start date filter
-        - limit_per_mailbox: max results per mailbox (default: 10)
-        """
+        """Search across multiple mailboxes in the organization."""
         query = payload.get("query", "")
         text = payload.get("text", "")
 
@@ -691,7 +827,6 @@ class EmailConnector(BaseService):
         date_from = payload.get("date_from")
         limit_per = min(int(payload.get("limit_per_mailbox", 10)), 25)
 
-        # If no specific mailboxes, get active users from Graph
         if not mailboxes:
             try:
                 users_data = self._graph_request(
@@ -710,7 +845,6 @@ class EmailConnector(BaseService):
             except Exception as e:
                 return {"status": "error", "error": f"Could not list users: {e}"}
 
-        # Search each mailbox
         all_results = []
         errors = []
 
@@ -720,7 +854,7 @@ class EmailConnector(BaseService):
             if resolved:
                 filters.append(f"receivedDateTime ge {resolved}")
 
-        for mbox in mailboxes[:50]:  # Cap at 50 mailboxes
+        for mbox in mailboxes[:50]:
             try:
                 params = {
                     "$search": f'"{query}"',
@@ -752,7 +886,6 @@ class EmailConnector(BaseService):
             except Exception as e:
                 errors.append(f"{mbox}: {e}")
 
-        # Sort by date
         all_results.sort(key=lambda x: x.get("received_at", ""), reverse=True)
 
         return {
@@ -761,7 +894,7 @@ class EmailConnector(BaseService):
             "query": query,
             "mailboxes_searched": len(mailboxes),
             "count": len(all_results),
-            "messages": all_results[:100],  # Cap total results
+            "messages": all_results[:100],
             "errors": errors[:5] if errors else [],
         }
 
@@ -772,17 +905,12 @@ class EmailConnector(BaseService):
         import re
         result = {}
 
-        # Strip Slack link formatting: <mailto:user@domain.com|user@domain.com> → user@domain.com
         text = re.sub(r'<mailto:([^|>]+)\|[^>]+>', r'\1', text)
-        # Also handle <mailto:user@domain.com> without display text
         text = re.sub(r'<mailto:([^>]+)>', r'\1', text)
-        # And generic Slack links: <http://...|display>
         text = re.sub(r'<([^|>]+)\|[^>]+>', r'\1', text)
 
-        # Extract email addresses — first one is likely the mailbox target
         emails = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', text)
         if emails:
-            # Check if it's a "search X's mailbox" or "emails from X"
             from_match = re.search(r'(?:from|sent by)\s+(\S+@\S+)', text, re.IGNORECASE)
             to_match = re.search(r'(?:to|sent to|received by)\s+(\S+@\S+)', text, re.IGNORECASE)
             mailbox_match = re.search(r"(?:search|check|look in|look at)\s+(\S+@\S+)(?:'s)?(?:\s+mailbox)?", text, re.IGNORECASE)
@@ -794,29 +922,25 @@ class EmailConnector(BaseService):
             elif to_match:
                 result["to_email"] = to_match.group(1)
 
-            # If we have emails but no specific role, first is mailbox
             if "mailbox" not in result and "from_email" not in result and "to_email" not in result:
                 result["mailbox"] = emails[0]
 
-        # Extract search terms — text after "for", "about", "containing", "with"
         query_match = re.search(
             r'(?:for|about|containing|with|mentioning|regarding)\s+["\']?(.+?)["\']?\s*$',
             text, re.IGNORECASE,
         )
         if query_match:
             raw_query = query_match.group(1).strip("'\" ")
-            # Clean out filler phrases — just keep the actual search terms
             raw_query = re.sub(
                 r'\b(emails?|with|in\s+the|subject\s+line|subject|body|that\s+contain|containing|line)\b',
                 '', raw_query, flags=re.IGNORECASE,
             )
-            raw_query = re.sub(r"['\"]", "", raw_query)  # Remove stray quotes
+            raw_query = re.sub(r"['\"]", "", raw_query)
             raw_query = re.sub(r'\s+', ' ', raw_query).strip()
             if raw_query:
                 result["query"] = raw_query
-        
+
         if "query" not in result:
-            # Fall back: remove known command words and emails, rest is the query
             cleaned = re.sub(r'[\w.+-]+@[\w-]+\.[\w.-]+', '', text)
             cleaned = re.sub(
                 r'\b(search|check|find|look|emails?|mailbox|inbox|messages?|from|to|sent|in|for|the|a|an|my|their|his|her|show|me|get|where|subject|contains?|line)\b',
@@ -827,7 +951,6 @@ class EmailConnector(BaseService):
             if cleaned:
                 result["query"] = cleaned
 
-        # Date ranges
         date_match = re.search(r'(?:last|past)\s+(\d+)\s*(days?|weeks?|months?|d|w|m)', text, re.IGNORECASE)
         if date_match:
             amount = int(date_match.group(1))
@@ -841,7 +964,6 @@ class EmailConnector(BaseService):
         import re
         now = datetime.now(timezone.utc)
 
-        # Relative: "7d", "30d", "2w", "1m"
         rel_match = re.match(r'(\d+)\s*(d|w|m)', date_str, re.IGNORECASE)
         if rel_match:
             amount = int(rel_match.group(1))
@@ -856,7 +978,6 @@ class EmailConnector(BaseService):
                 return None
             return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # ISO date passthrough
         if 'T' in date_str or '-' in date_str:
             return date_str
 
@@ -871,6 +992,8 @@ class EmailConnector(BaseService):
             "email.list",
             "email.read",
             "email.poll",
+            "m365.active-users",
+            "m365.mailbox-usage",
         ]
 
     def get_metadata(self) -> dict:
@@ -900,21 +1023,16 @@ class EmailConnector(BaseService):
         import re
         result = {"to": [], "subject": "", "body": ""}
 
-        # Strip Slack link formatting
         text = re.sub(r'<mailto:([^|>]+)\|[^>]+>', r'\1', text)
         text = re.sub(r'<mailto:([^>]+)>', r'\1', text)
 
-        # Extract email addresses
         emails = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', text)
         result["to"] = emails
 
-        # Extract body — look for common patterns
-        # "saying 'xxx'" or "saying xxx"
         saying_match = re.search(r"(?:saying|with message|with body|that says|message)\s+['\"]?(.+?)['\"]?\s*$", text, re.IGNORECASE)
         if saying_match:
             result["body"] = saying_match.group(1).strip("'\"")
         else:
-            # "subject: xxx body: yyy" pattern
             subject_match = re.search(r"subject[:\s]+['\"]?(.+?)['\"]?(?:\s+body|\s+saying|\s*$)", text, re.IGNORECASE)
             body_match = re.search(r"body[:\s]+['\"]?(.+?)['\"]?\s*$", text, re.IGNORECASE)
             if subject_match:
@@ -922,10 +1040,8 @@ class EmailConnector(BaseService):
             if body_match:
                 result["body"] = body_match.group(1).strip("'\"")
 
-        # If we still don't have a body, use everything after the email address
         if not result["body"] and emails:
             after_email = text.split(emails[-1])[-1].strip()
-            # Remove common connector words
             after_email = re.sub(r'^[\s,]*(saying|with|that|and)\s+', '', after_email, flags=re.IGNORECASE)
             after_email = after_email.strip("'\" ")
             if after_email:
