@@ -350,7 +350,7 @@ INTENT_PATTERNS = [
     },
     # M365 / Office 365 — list users, active accounts, mailboxes
     {
-        "pattern": r"\b(list\s+(all\s+)?users?|all\s+(active\s+)?users?|active\s+(user|account|mailbox)|disabled\s+(user|account)|user\s+(list|inventory|report|count)|how\s+many\s+users?|office\s*365\s+users?|o365\s+users?|m365\s+users?|entra\s*id?\s+users?|mailbox\s+(list|inventory|count|report)|active\s+mailbox|licensed\s+users?|pull\s+(all\s+)?(active\s+)?(users?|accounts?|mailbox))\b",
+        "pattern": r"\b(list\s+(all\s+)?users?|all\s+(active\s+)?users?|active\s+(user|account|mailbox)|disabled\s+(user|account)|user\s+(list|inventory|report|count)|how\s+many\s+users?|office\s*365\s+users?|o365\s+users?|m365\s+users?|entra\s*id?\s+users?|mailbox\s+(list|inventory|count|report)|active\s+mailbox|licensed\s+users?|pull\s+(all\s+)?(active\s+|disabled\s+)?(users?|accounts?|mailbox)|users?\s+with\s+disabled|disabled\s+accounts?|accounts?\s+that\s+(are|have)\s+(disabled|active|licensed))\b",
         "intent": Intent(
             name="m365_active_users",
             resources=[("email", "query")],
@@ -704,7 +704,7 @@ Rules:
 - If the message asks about tickets, ZenDesk, issues, or helpdesk → use a zendesk_* intent
 - If the message asks about alerts, security events, SIEM, Wazuh → use an alert_* or wazuh_* intent
 - If the message asks about network devices, switches, APs, VLANs, DHCP, clients, Meraki, what's connected, uplinks, WAN → use a meraki_* intent
-- If the message asks to list users, active accounts, mailboxes, licensed users, O365/M365 users, or user counts → use m365_active_users
+- If the message asks to list users, active accounts, disabled accounts, mailboxes, licensed users, O365/M365 users, user counts, or names of users with a specific account status → use m365_active_users (NOT user_lookup — user_lookup is for looking up ONE specific person). Even if the message ALSO mentions creating a ticket, the data query takes priority — Kevin will handle ticket creation after getting the data.
 - If the message asks about mailbox storage, usage, size, or biggest mailboxes → use m365_mailbox_usage
 - If the message asks about users, accounts, sign-ins, MFA → use an entra_* intent
 - If the message asks to send/compose email → use email_send
@@ -731,7 +731,7 @@ Intent:"""
                     "max_tokens": 30,
                     "messages": [{"role": "user", "content": prompt}],
                 },
-                timeout=3.0,  # Hard timeout — don't slow down the pipeline
+                timeout=5.0,  # LLM classifier timeout
             )
 
             if resp.status_code != 200:
@@ -834,7 +834,7 @@ Intent:"""
             age = now - pending["created_at"]
             # PowerShell commands need longer timeout (WinRM round trip)
             intent_name = pending.get("intent", DEFAULT_INTENT).name if pending.get("intent") else ""
-            timeout = 60 if "powershell" in intent_name else 10
+            timeout = 60 if "powershell" in intent_name else 30 if "signin" in intent_name or "mfa" in intent_name or "risky" in intent_name or "m365" in intent_name else 10
             if age > timeout:
                 timed_out.append(corr_id)
 

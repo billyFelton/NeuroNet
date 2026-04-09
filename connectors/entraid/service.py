@@ -293,10 +293,10 @@ class EntraIDConnector(BaseService):
                     "id,createdDateTime,userDisplayName,userPrincipalName,"
                     "userId,appDisplayName,ipAddress,clientAppUsed,"
                     "location,status,riskDetail,riskLevelDuringSignIn,"
-                    "mfaDetail,conditionalAccessStatus,"
-                    "authenticationRequirement"
+                    "conditionalAccessStatus"
                 ),
             },
+            max_pages=3,
         )
 
         # Summarize for the AI layer

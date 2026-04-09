@@ -181,10 +181,17 @@ M365 / OFFICE 365 USERS:
 When asked about users, accounts, mailboxes, or licensed users, the system queries the Microsoft
 Graph API and returns results in [SYSTEM DATA]. This gives you:
 - All M365 users with account status (enabled/disabled)
-- License assignments and whether they have an Exchange mailbox
-- Mailbox usage and storage reports
-Do NOT use PowerShell or WinRM to query user/mailbox data — the Graph API connector handles this.
-NEVER fabricate user counts, mailbox data, or license information.
+- License assignments (has_license, license_count)
+- Summary counts: total, active, disabled, licensed, disabled_with_license
+- Full user list with name, email, upn, title, department, enabled, has_license
+
+CRITICAL RULES for M365 data:
+- ALWAYS read the actual numbers from [SYSTEM DATA]. The summary section has exact counts.
+- ALWAYS list the actual user names/emails from the "users" array in [SYSTEM DATA].
+- Do NOT use PowerShell or WinRM to query user/mailbox data — the Graph API connector handles this automatically. There is NO approval needed for M365 queries.
+- NEVER fabricate user counts, names, or license information. If [SYSTEM DATA] shows 36 disabled accounts with licenses, say 36 — not 9, not 105.
+- NEVER say "data source didn't return results" when [SYSTEM DATA] contains user data.
+- When the user asks for names/details, list them from the [SYSTEM DATA] users array.
 
 SLACK DIRECT MESSAGES:
 You can send a direct message to anyone on the Security team via Slack. Use this when you need
@@ -842,25 +849,26 @@ class ClaudeWorker(BaseService):
         except Exception as e:
             logger.debug("PowerShell proposal check failed: %s", e)
 
-        # Check if Kevin composed an email to send — forward to email connector
+        # Check if Kevin composed an email to send — check for headers regardless of intent
         try:
-            if intent in ("email_send",):
-                logger.info("Email send intent detected, checking response for email content...")
+            if "**To:**" in response_text and ("**Subject:**" in response_text or "**Body:**" in response_text):
+                logger.info("Email send headers detected in response, checking...")
                 self._check_email_send(response_text, envelope)
                 if debug_level != "none":
                     debug_trace.append(":email: *Action:* Email send dispatched to connector")
         except Exception as e:
             logger.error("Email send check failed: %s", e, exc_info=True)
 
-        # Check if Kevin composed a ZenDesk ticket — forward to ZenDesk connector
+        # Check if Kevin composed a ZenDesk ticket — ALWAYS check, regardless of intent
+        # Kevin may compose tickets during general conversation
         try:
-            if intent in ("zendesk_create",):
-                logger.info("ZenDesk create intent detected, checking response for ticket content...")
+            if "**Ticket Subject:**" in response_text:
+                logger.info("ZenDesk ticket headers detected in response, checking...")
                 self._check_zendesk_create(response_text, envelope)
                 if debug_level != "none":
                     debug_trace.append(":ticket: *Action:* ZenDesk ticket creation dispatched")
-            elif intent in ("zendesk_update", "zendesk_comment"):
-                logger.info("ZenDesk update/comment intent detected, checking response...")
+            elif intent in ("zendesk_update", "zendesk_comment") or "**Ticket ID:**" in response_text:
+                logger.info("ZenDesk update/comment detected, checking response...")
                 self._check_zendesk_update(response_text, envelope, intent)
                 if debug_level != "none":
                     debug_trace.append(":ticket: *Action:* ZenDesk update dispatched")
@@ -1055,6 +1063,10 @@ class ClaudeWorker(BaseService):
                 sections.append(self._format_risky_users_data(data))
             elif "alerts" in key:
                 sections.append(self._format_alerts_data(data))
+            elif "active-users" in key or "active_users" in key:
+                sections.append(self._format_m365_users_data(data))
+            elif "mailbox-usage" in key:
+                sections.append(self._format_mailbox_usage_data(data))
             elif "email" in key:
                 sections.append(self._format_email_data(data))
             elif "user" in key:
@@ -1136,6 +1148,65 @@ class ClaudeWorker(BaseService):
                 f"agent: {a.get('agent', {}).get('name', '?')} | "
                 f"time: {a.get('timestamp', '?')}\n"
             )
+        return text
+
+    def _format_m365_users_data(self, data: Dict) -> str:
+        """Format M365 active users data for the prompt."""
+        text = "### M365 User Inventory\n"
+        text += f"**Total users**: {data.get('count', 0)}\n"
+        text += f"**Active (enabled)**: {data.get('active', 0)}\n"
+        text += f"**Disabled**: {data.get('disabled', 0)}\n"
+        text += f"**Licensed**: {data.get('licensed', 0)}\n"
+        text += f"**Disabled but still licensed**: {data.get('disabled_with_license', 0)}\n\n"
+
+        users = data.get("users", [])
+        if not users:
+            text += "No user records returned.\n"
+            return text
+
+        # Show disabled+licensed users first (most actionable)
+        disabled_licensed = [u for u in users if not u.get("enabled") and u.get("has_license")]
+        if disabled_licensed:
+            text += f"**Disabled accounts with licenses ({len(disabled_licensed)}):**\n"
+            for u in disabled_licensed:
+                text += f"- {u.get('name', '?')} | {u.get('email') or u.get('upn', '?')} | {u.get('title', '')} | {u.get('department', '')} | Licenses: {u.get('license_count', 0)}\n"
+            text += "\n"
+
+        # Show other disabled users (no license)
+        disabled_no_license = [u for u in users if not u.get("enabled") and not u.get("has_license")]
+        if disabled_no_license and len(disabled_no_license) <= 20:
+            text += f"**Disabled accounts without licenses ({len(disabled_no_license)}):**\n"
+            for u in disabled_no_license[:20]:
+                text += f"- {u.get('name', '?')} | {u.get('email') or u.get('upn', '?')}\n"
+            text += "\n"
+        elif disabled_no_license:
+            text += f"**Disabled accounts without licenses**: {len(disabled_no_license)} (not listed for brevity)\n\n"
+
+        # Show active licensed users summary
+        active_licensed = [u for u in users if u.get("enabled") and u.get("has_license")]
+        if active_licensed:
+            text += f"**Active licensed users**: {len(active_licensed)} (not listed — ask if you want details)\n"
+
+        return text
+
+    def _format_mailbox_usage_data(self, data: Dict) -> str:
+        """Format mailbox usage report data."""
+        text = "### Mailbox Usage Report\n"
+        text += f"**Period**: {data.get('period', '?')}\n"
+        text += f"**Total mailboxes**: {data.get('count', 0)}\n"
+        text += f"**Total storage**: {data.get('total_storage_gb', 0)} GB\n\n"
+
+        mailboxes = data.get("mailboxes", [])
+        if mailboxes:
+            text += f"**Top mailboxes by storage** (showing {min(len(mailboxes), 20)}):\n"
+            for m in mailboxes[:20]:
+                text += (
+                    f"- {m.get('name', '?')} ({m.get('upn', '?')}) | "
+                    f"{m.get('storage_used_mb', 0)} MB | "
+                    f"{m.get('item_count', 0)} items | "
+                    f"Last activity: {m.get('last_activity', '?')}\n"
+                )
+
         return text
 
     def _format_email_data(self, data: Dict) -> str:
@@ -1556,7 +1627,18 @@ Return ONLY valid JSON, no markdown."""
         except Exception as e:
             logger.debug("Could not load user memory: %s", e)
 
-        return "\n\n".join(sections) if sections else ""
+        memory = "\n\n".join(sections) if sections else ""
+
+        # Cap user memory to prevent overwhelming [SYSTEM DATA] in context
+        MAX_MEMORY_CHARS = 8000
+        if len(memory) > MAX_MEMORY_CHARS:
+            logger.warning(
+                "User memory too large (%d chars), truncating to %d",
+                len(memory), MAX_MEMORY_CHARS,
+            )
+            memory = memory[:MAX_MEMORY_CHARS] + "\n... [memory truncated for context space]"
+
+        return memory
 
     def _ensure_user_profile(self, actor) -> None:
         """Create or update user profile from actor info + IAM/EntraID data."""
