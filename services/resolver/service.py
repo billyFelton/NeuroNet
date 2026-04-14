@@ -103,7 +103,7 @@ INTENT_PATTERNS = [
     },
     # Generic (queries BOTH instances)
     {
-        "pattern": r"\b(alert|alerts|security\s+event|siem|threat|wazuh)\b",
+        "pattern": r"\b(alert|alerts|security\s+event|siem|threat|wazuh\s+alert)",
         "intent": Intent(
             name="security_alerts",
             resources=[("wazuh-alerts", "query")],
@@ -125,7 +125,7 @@ INTENT_PATTERNS = [
         ),
     },
     {
-        "pattern": r"\b(agent|agents|endpoint|wazuh\s+agent)\b",
+        "pattern": r"\b(agent\s+status|agents?\s+health|endpoint\s+status|wazuh\s+agent|agent\s+inventory|agent\s+list|how\s+many\s+agents|fleet\s+status|wazuh\s+status)\b",
         "intent": Intent(
             name="agent_status",
             resources=[("wazuh-agents", "query")],

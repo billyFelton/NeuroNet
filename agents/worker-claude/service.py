@@ -203,6 +203,33 @@ CRITICAL RULES:
 - You are a security awareness coach, not a security operations tool""",
 }
 
+# AI-Admin gets security-admin prompt plus knowledge management capabilities
+SYSTEM_PROMPTS["ai-admin"] = SYSTEM_PROMPTS["security-admin"] + """
+
+═══ AI-ADMIN: KNOWLEDGE BASE MANAGEMENT ═══
+You are talking to an AI Administrator who can manage your knowledge base directly.
+
+When they share facts about users, UPDATE the user profile immediately:
+**KB Update User:** user@heads-up.com
+**Field:** preferred_name
+**Value:** the new value
+
+Supported fields: preferred_name, rapport_notes, preferences, work_context
+
+When they share interests or personal details about a user, use the preferences field:
+**KB Update User:** user@heads-up.com  
+**Field:** preferences
+**Value:** {"interests": ["Lord of the Rings", "hiking"]}
+
+When they ask to view knowledge base contents:
+**KB Query:** user_profiles / entries / assets
+
+When they ask to delete knowledge:
+**KB Delete:** specify what to remove
+
+The system parses these headers and executes database updates automatically.
+Always confirm what you updated after processing a KB command."""
+
 DEFAULT_SYSTEM_PROMPT = SYSTEM_PROMPTS["general-user"]
 
 
@@ -572,6 +599,8 @@ class ClaudeWorker(BaseService):
                     data=data,
                     ttl_minutes=30,
                 )
+                # Auto-populate knowledge base from connector data
+                self._populate_kb_from_data(key, data)
 
         # For follow-up queries with no fresh data, check the cache
         # This handles "now create a ticket with those results" type requests
@@ -800,6 +829,15 @@ class ClaudeWorker(BaseService):
         except Exception as e:
             logger.debug("Slack DM check failed: %s", e)
 
+        # Check if Kevin is updating the knowledge base (ai-admin only)
+        try:
+            if "**KB Update User:**" in response_text:
+                self._handle_kb_update(response_text, envelope)
+                if debug_level != "none":
+                    debug_trace.append(":brain: *Action:* Knowledge base update executed")
+        except Exception as e:
+            logger.error("KB update failed: %s", e)
+
         # Publish debug trace as a separate message to the same channel
         if debug_trace and debug_level != "none":
             reply.payload["_debug_trace"] = "\n".join(debug_trace)
@@ -849,7 +887,7 @@ class ClaudeWorker(BaseService):
     def _select_system_prompt(self, roles: List[str]) -> str:
         """Select system prompt based on highest-privilege role."""
         # Role hierarchy: security-admin > security-analyst > it-support > general-user
-        role_priority = ["security-admin", "security-analyst", "it-support", "general-user"]
+        role_priority = ["ai-admin", "security-admin", "security-analyst", "it-support", "general-user"]
         for role in role_priority:
             if role in roles:
                 return SYSTEM_PROMPTS.get(role, DEFAULT_SYSTEM_PROMPT)
@@ -1931,6 +1969,214 @@ Return ONLY valid JSON, no markdown."""
             logger.debug("Profile update returned invalid JSON")
         except Exception as e:
             logger.debug("Profile update error: %s", e)
+
+    # ── Auto-populate Knowledge Base from Connector Data ────────
+
+    def _populate_kb_from_data(self, data_key: str, data: Dict) -> None:
+        """Automatically upsert assets/facts from connector data into the knowledge base."""
+        if not self._ensure_kb_connection() or not data:
+            return
+
+        try:
+            if "agents" in data_key and "wazuh" in data_key:
+                self._populate_wazuh_agents(data, data_key)
+            elif "devices" in data_key or "summary" in data_key:
+                if "meraki" in data_key:
+                    self._populate_meraki_devices(data)
+            elif "active-users" in data_key:
+                # User data already in user_profiles via EntraID sync
+                pass
+        except Exception as e:
+            logger.debug("KB population from %s failed: %s", data_key, e)
+
+    def _populate_wazuh_agents(self, data: Dict, data_key: str) -> None:
+        """Upsert Wazuh agents into knowledge.assets."""
+        agents = data.get("agents", [])
+        if not agents:
+            return
+
+        instance = "dt" if "wazuh." in data_key and "infra" not in data_key else "inf"
+        if "infra" in data_key or "wazuh-inf" in data_key:
+            instance = "inf"
+
+        count = 0
+        with self._kb_conn.cursor() as cur:
+            for agent in agents:
+                hostname = agent.get("name", "")
+                if not hostname or hostname == "wazuh-manager":
+                    continue
+
+                agent_id = str(agent.get("id", ""))
+                ip = agent.get("ip", "")
+                os_info = agent.get("os", {})
+                if isinstance(os_info, dict):
+                    os_name = os_info.get("name", "")
+                    os_version = os_info.get("version", "")
+                    os_platform = os_info.get("platform", "")
+                else:
+                    os_name = str(os_info)
+                    os_version = ""
+                    os_platform = ""
+
+                status = agent.get("status", "")
+                group_list = agent.get("group", [])
+                if isinstance(group_list, list):
+                    groups = ", ".join(group_list)
+                else:
+                    groups = str(group_list)
+
+                # Determine asset type from OS
+                asset_type = "workstation"
+                name_lower = hostname.lower()
+                if any(s in name_lower for s in ["dc", "server", "srv", "sql", "rds", "macola"]):
+                    asset_type = "server"
+                elif "test" in name_lower:
+                    asset_type = "server"
+                elif os_platform == "linux":
+                    asset_type = "server"
+
+                ip_array = [ip] if ip and ip != "any" else []
+
+                try:
+                    cur.execute("""
+                        INSERT INTO knowledge.assets
+                            (asset_type, hostname, ip_addresses, os, os_version,
+                             wazuh_agent_id, wazuh_instance, tags, notes,
+                             learned_from, confidence)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'wazuh-sync', 0.9)
+                        ON CONFLICT (hostname, asset_type) DO UPDATE SET
+                            ip_addresses = CASE
+                                WHEN EXCLUDED.ip_addresses != '{}' THEN EXCLUDED.ip_addresses
+                                ELSE knowledge.assets.ip_addresses END,
+                            os = COALESCE(NULLIF(EXCLUDED.os, ''), knowledge.assets.os),
+                            os_version = COALESCE(NULLIF(EXCLUDED.os_version, ''), knowledge.assets.os_version),
+                            wazuh_agent_id = COALESCE(NULLIF(EXCLUDED.wazuh_agent_id, ''), knowledge.assets.wazuh_agent_id),
+                            wazuh_instance = EXCLUDED.wazuh_instance,
+                            last_seen = NOW()
+                    """, [
+                        asset_type, hostname, ip_array,
+                        os_name, os_version,
+                        agent_id, instance,
+                        [f"wazuh-{instance}", f"status:{status}"],
+                        f"Groups: {groups}" if groups else "",
+                    ])
+                    count += 1
+                except Exception:
+                    pass
+
+        if count > 0:
+            logger.info("KB assets: upserted %d Wazuh agents from %s", count, data_key)
+
+    def _populate_meraki_devices(self, data: Dict) -> None:
+        """Upsert Meraki devices into knowledge.assets."""
+        devices = data.get("devices", [])
+        if not devices:
+            # Summary might have devices nested in networks
+            networks = data.get("networks", [])
+            for net in networks:
+                devices.extend(net.get("devices", []))
+
+        if not devices:
+            return
+
+        count = 0
+        with self._kb_conn.cursor() as cur:
+            for dev in devices:
+                hostname = dev.get("name", "") or dev.get("serial", "")
+                if not hostname:
+                    continue
+
+                model = dev.get("model", "")
+                serial = dev.get("serial", "")
+                mac = dev.get("mac", "")
+                lan_ip = dev.get("lanIp", "")
+                wan_ip = dev.get("wan1Ip", "") or dev.get("publicIp", "")
+                status = dev.get("status", "")
+                network = dev.get("networkId", "")
+                tags = dev.get("tags", [])
+                if isinstance(tags, str):
+                    tags = tags.split()
+
+                # Determine type from model
+                asset_type = "network_device"
+                model_lower = model.lower()
+                if "mr" in model_lower:
+                    asset_type = "network_device"  # AP
+                elif "ms" in model_lower:
+                    asset_type = "network_device"  # Switch
+                elif "mx" in model_lower:
+                    asset_type = "appliance"  # Security appliance
+                elif "mv" in model_lower:
+                    asset_type = "appliance"  # Camera
+
+                ips = [ip for ip in [lan_ip, wan_ip] if ip]
+                macs = [mac] if mac else []
+
+                try:
+                    cur.execute("""
+                        INSERT INTO knowledge.assets
+                            (asset_type, hostname, ip_addresses, mac_addresses,
+                             device_model, manufacturer, tags, notes,
+                             learned_from, confidence)
+                        VALUES (%s, %s, %s, %s, %s, 'Cisco Meraki', %s, %s, 'meraki-sync', 0.95)
+                        ON CONFLICT (hostname, asset_type) DO UPDATE SET
+                            ip_addresses = CASE
+                                WHEN EXCLUDED.ip_addresses != '{}' THEN EXCLUDED.ip_addresses
+                                ELSE knowledge.assets.ip_addresses END,
+                            mac_addresses = CASE
+                                WHEN EXCLUDED.mac_addresses != '{}' THEN EXCLUDED.mac_addresses
+                                ELSE knowledge.assets.mac_addresses END,
+                            device_model = COALESCE(NULLIF(EXCLUDED.device_model, ''), knowledge.assets.device_model),
+                            last_seen = NOW()
+                    """, [
+                        asset_type, hostname, ips, macs,
+                        model, tags + [f"serial:{serial}", f"status:{status}"],
+                        f"Network: {network}" if network else "",
+                    ])
+                    count += 1
+                except Exception:
+                    pass
+
+        if count > 0:
+            logger.info("KB assets: upserted %d Meraki devices", count)
+
+    # ── Knowledge Base Management (AI-Admin) ──────────────────────
+
+    def _handle_kb_update(self, response_text, envelope):
+        """Parse KB update headers and execute DB updates."""
+        import re
+        if not self._ensure_kb_connection():
+            return
+        actor = envelope.actor
+        if not actor or "ai-admin" not in (actor.roles or []):
+            logger.warning("KB update rejected: user %s lacks ai-admin role", getattr(actor, 'email', 'unknown'))
+            return
+        pattern = r'\*\*KB Update User:\*\*\s*(\S+@\S+)\s*\n\*\*Field:\*\*\s*(.+?)\s*\n\*\*Value:\*\*\s*(.+?)(?:\n\n|\n\*\*|\Z)'
+        updates = re.findall(pattern, response_text, re.DOTALL)
+        allowed = {"preferred_name", "rapport_notes", "preferences", "work_context", "job_title", "department"}
+        for email, field, value in updates:
+            email, field, value = email.strip(), field.strip().lower(), value.strip()
+            if field not in allowed:
+                logger.warning("KB update rejected: unknown field %s", field)
+                continue
+            try:
+                with self._kb_conn.cursor() as cur:
+                    if field in ("preferences", "work_context"):
+                        try:
+                            json_val = json.loads(value)
+                        except json.JSONDecodeError:
+                            json_val = {field: value}
+                        cur.execute("UPDATE knowledge.user_profiles SET " + field + " = " + field + " || %s::jsonb WHERE LOWER(user_email) = LOWER(%s)", [json.dumps(json_val), email])
+                    elif field == "rapport_notes":
+                        cur.execute("UPDATE knowledge.user_profiles SET rapport_notes = CASE WHEN rapport_notes = '' THEN %s ELSE rapport_notes || '; ' || %s END WHERE LOWER(user_email) = LOWER(%s)", [value, value, email])
+                    else:
+                        cur.execute("UPDATE knowledge.user_profiles SET " + field + " = %s WHERE LOWER(user_email) = LOWER(%s)", [value, email])
+                    if cur.rowcount > 0:
+                        logger.info("KB updated: %s.%s = %s (by %s)", email, field, value[:50], actor.email)
+                    else:
+                        logger.warning("KB update: no profile found for %s", email)
+            except Exception as e:
+                logger.error("KB update failed for %s.%s: %s", email, field, e)
 
     # ── Query Result Cache ────────────────────────────────────────────
 
