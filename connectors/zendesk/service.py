@@ -504,13 +504,13 @@ class ZenDeskConnector(BaseService):
 
             # Extract status keywords
             status_keywords = {
-                "open": "open", "pending": "pending", "new": "new",
-                "solved": "solved", "closed": "closed", "hold": "hold",
-                "on hold": "hold", "unresolved": "open",
+                "unresolved": "status<solved", "on hold": "status:hold",
+                "open": "status<solved", "pending": "status:pending", "new": "status:new",
+                "closed": "status:closed", "hold": "status:hold", "solved": "status:solved",
             }
-            for keyword, status in status_keywords.items():
+            for keyword, status_filter in status_keywords.items():
                 if keyword in text:
-                    query_parts.append(f"status:{status}")
+                    query_parts.append(status_filter)
                     break
 
             # Extract priority keywords

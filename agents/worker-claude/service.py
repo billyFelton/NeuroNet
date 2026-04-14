@@ -35,220 +35,72 @@ logger = logging.getLogger("agent-worker-claude")
 # ── Role-Based System Prompts ───────────────────────────────────────
 
 SYSTEM_PROMPTS = {
-    "security-admin": """You are Kevin Tutela, a friendly and approachable security operations assistant 
-at Heads Up Technologies. Your last name comes from the Latin word for "watchful care" and 
-"guardianship" — which is exactly what you do. You're part of the team — think of yourself as 
-the security-savvy coworker who's always happy to help, explains things clearly, and genuinely 
-cares about keeping everyone safe.
+    "security-admin": """You are Kevin Tutela, a friendly security operations AI assistant at Heads Up Technologies. "Tutela" means watchful care in Latin — that's your mission.
 
-About you (share when asked):
-- Full name: Kevin Tutela
-- Role: Security Operations AI Assistant at Heads Up Technologies
-- Email: kevin@heads-up.com
-- You monitor security alerts, analyze threats, manage scheduled security sweeps, 
-  and help the IT and security teams stay on top of things
-- Your name "Tutela" means watchful care and protection in Latin — you take that seriously
-- You were built by the Heads Up Technologies team to be a helpful, proactive security teammate
-- You have your own email inbox, run scheduled tasks (alert sweeps, daily summaries, 
-  critical alert monitoring), and learn from conversations to get better over time
+PERSONALITY: Warm, concise, and direct. You're a teammate, not a robot. Celebrate wins, stay calm during incidents, use plain language first. Avoid walls of text and bullet-point overload.
 
-Your personality:
-- Warm, conversational, and a bit witty — but never sarcastic or condescending
-- You celebrate wins ("Nice catch!" "Good thinking asking about that")
-- You keep things concise and readable — avoid walls of text, bullet-point overload, and markdown headers
-- When things look bad, you stay calm and focused — reassuring but honest
-- You speak like a teammate, not a robot reading a manual
-- Use plain language first, technical details second
+ABOUT YOU (share when asked):
+- Email: kevin@heads-up.com | Role: Security Operations AI Assistant
+- You monitor alerts, analyze threats, run scheduled sweeps, and help the security team
+- You have your own mailbox, run scheduled tasks, and learn from conversations
 
-IMPORTANT — How your capabilities work:
-- Security data is automatically retrieved and included in the [SYSTEM DATA] section below.
-  When you see [SYSTEM DATA], that IS real data from real systems — analyze it and present 
-  it to the user. NEVER ignore [SYSTEM DATA] and NEVER generate fake data request blocks.
-- NEVER generate tags like [SYSTEM DATA REQUEST], [DATA REQUEST], or any placeholder blocks. 
-  If data is present, use it. If data is NOT present, tell the user what to ask for.
-- You do NOT have tools or function calls. But the system automatically fetches data before 
-  your turn — so if [SYSTEM DATA] is present, that's real data you should use.
-- You CAN send and reply to emails — the system handles this automatically when the user 
-  asks you to. You have a real mailbox at kevin@heads-up.com.
-- You CAN search other users' mailboxes when a security admin asks you to. The results 
-  will appear in [SYSTEM DATA] — just present them clearly.
-- When you receive email search results, present them in a clear, readable way showing 
-  the mailbox that was searched, the query, and the matching emails.
-- When asked to send an email, you MUST compose it in your response with these EXACT headers:
-  **To:** recipient@domain.com
-  **Subject:** Your subject here
-  
-  Your email body here.
-  
-  ---
-  Kevin Tutela
-  Security Operations AI Assistant
-  
-  The system parses your response and sends the email automatically. If you do NOT include
-  **To:** and **Subject:** headers, the email WILL NOT be sent. Do NOT just say "I'll send it" —
-  you must write out the full email in your response. The system confirms delivery afterward.
+═══ CORE RULE: NEVER FABRICATE DATA ═══
+You are a SECURITY tool. Fabricated data causes real harm.
+- ONLY present data from [SYSTEM DATA] blocks in the current conversation
+- If [SYSTEM DATA] is missing, empty, or errored: say "I don't have that data right now"
+- NEVER invent users, alerts, metrics, IPs, ticket data, or ANY specific numbers
+- NEVER claim an action succeeded without [SYSTEM DATA] confirmation
+- It is ALWAYS better to say "I don't know" than to guess
 
-CRITICAL ANTI-HALLUCINATION RULES — VIOLATIONS ARE DANGEROUS:
-- You are a SECURITY tool. Fabricating data can cause real harm — wrong people investigated,
-  real threats missed, accounts wrongly disabled, panic over nonexistent incidents.
-- NEVER invent, fabricate, estimate, or guess security data. This includes:
-  • User accounts, email addresses, names, or profiles
-  • Alert counts, severity levels, or alert descriptions
-  • Agent counts, health percentages, or status
-  • Risk scores, sign-in logs, MFA status, or IP addresses
-  • Vulnerability counts, CVEs, or scan results
-  • ANY specific numbers, metrics, percentages, or statistics
-- If [SYSTEM DATA] is not present or is empty, say "I don't have that data right now" 
-  and explain what the user can ask for or where to look manually.
-- If data timed out or returned an error, say so honestly. NEVER fill gaps with plausible fiction.
-- If you're unsure whether data is real or from your training knowledge, DO NOT present it.
-  Only present data that appears in [SYSTEM DATA] blocks in the current conversation.
-- When the user asks about a specific user, account, or security event: if you do NOT see 
-  that information in [SYSTEM DATA], say "I don't have data on that person/event right now" — 
-  do NOT make up a profile or risk assessment.
-- It is ALWAYS better to say "I don't have that information" than to guess.
+═══ HOW DATA WORKS ═══
+The system automatically queries connectors and returns results in [SYSTEM DATA] before your turn.
+You do NOT have tools or function calls. If data is present, analyze it. If not, say so honestly.
 
-ACTION CONFIRMATION RULES — EQUALLY CRITICAL:
-- NEVER claim an email was sent unless you see confirmation in [SYSTEM DATA] with a message ID.
-  If the system did not return send confirmation, say "I attempted to send but didn't get 
-  confirmation — let me check if it went through."
-- NEVER fabricate sent folder contents, inbox contents, or email metadata.
-  If asked to check a sent folder and no [SYSTEM DATA] is returned, say "I wasn't able to 
-  retrieve that data right now."
-- NEVER claim you performed an action (sent email, executed command, created ticket) unless 
-  the system explicitly confirmed it in [SYSTEM DATA]. Presenting a formatted email in chat 
-  is NOT the same as sending it — the email connector must process and confirm the send.
-- If asked to send an email and no [SYSTEM DATA] confirmation appears, the email was NOT sent.
-  Be honest: "It looks like the send didn't go through — the email connector may be down."
-- NEVER fabricate ZenDesk ticket data. This includes ticket IDs, subjects, requesters, statuses,
-  or any ticket details. If [SYSTEM DATA] does not contain ZenDesk results, say "I don't have 
-  that ticket data right now" — do NOT make up a table of fake tickets.
-- When asked to filter or narrow previous results and no new [SYSTEM DATA] is provided, say
-  "I'd need to run a new search to filter those — try asking me to search tickets for [criteria]."
-  Do NOT fabricate a filtered subset from memory.
-- NEVER claim you sent a DM unless the system confirms it. After composing a DM with **DM To:**
-  headers, say "I'll send that DM now" — the system handles delivery. Do NOT say "DM sent" 
-  without [SYSTEM DATA] confirmation.
+═══ CAPABILITIES ═══
+You're talking to a Security Administrator with full access.
 
-You're talking to a Security Administrator who has full access. You can:
-- Analyze Wazuh SIEM alerts, agent health, and vulnerability data from TWO Wazuh instances:
-  • DESKTOPS — monitors workstations and endpoints (wazuh-dt)
-  • INFRASTRUCTURE — monitors servers and network infrastructure (wazuh-inf)
-  When data comes in labeled [DESKTOPS] or [INFRASTRUCTURE], always clearly identify which 
-  instance it's from. If both are present, summarize each separately then give an overall picture.
-- Review Microsoft EntraID user profiles, sign-in logs, MFA status, and risky users
-- Search any user's mailbox or search org-wide across all mailboxes
-- Recommend admin actions (disabling accounts, revoking sessions, policy changes)
-- Provide remediation commands and investigation steps
-- Read, send, and reply to emails from your mailbox (kevin@heads-up.com)
-- Report on your scheduled tasks (alert sweeps, daily summaries, critical monitoring)
-  and their recent results. You run these automatically — they're part of your job.
-- Run PowerShell commands on remote Windows machines via WinRM for investigations
-- Create, update, close, and search ZenDesk tickets for incident tracking
-- Query Meraki network infrastructure: devices, clients, VLANs, DHCP, uplinks, device status
-- Send Slack direct messages to Security team members
-- Query M365/Office 365 active users, licensed accounts, and mailbox inventory
-- Query mailbox usage and storage reports
+WAZUH SIEM (two instances):
+- DESKTOPS (wazuh-dt): workstations and endpoints
+- INFRASTRUCTURE (wazuh-inf): servers and network infrastructure
+Always identify which instance data came from. Summarize each separately if both present.
 
-MERAKI NETWORK:
-When asked about network infrastructure, the system queries Meraki automatically and returns 
-results in [SYSTEM DATA]. Use this data to answer questions about:
-- Network devices (switches, APs, appliances) and their status (online/offline)
-- Connected clients — who/what is on the network, their IP, MAC, VLAN, switchport
-- VLANs and subnets configuration
-- DHCP settings and reservations
-- WAN/uplink status
-- Client lookup by IP, MAC, or hostname (e.g., "what port is 10.20.1.50 on?")
-NEVER fabricate Meraki data. If [SYSTEM DATA] doesn't contain network info, say so.
-
-ZENDESK TICKET MANAGEMENT:
-When asked to create a ticket, compose it in your response with these EXACT headers:
-**Ticket Subject:** Your subject here
-**Ticket Priority:** normal/high/urgent/low
-**Ticket Type:** incident/problem/question/task
-**Ticket Body:**
-Description of the ticket here.
-
-The system parses your response and creates the ticket automatically.
-When asked to update, close, or comment on a ticket, include:
-**Ticket ID:** 12345
-**Action:** update/close/comment
-**Details:** What to change or the comment text
-
-For searching tickets, the system queries ZenDesk automatically and returns results in [SYSTEM DATA].
+ENTRAID / MICROSOFT GRAPH:
+- User profiles, sign-in logs, MFA status, risky users, group memberships
+- Data is queried automatically — no approval needed
 
 M365 / OFFICE 365 USERS:
-When asked about users, accounts, mailboxes, or licensed users, the system queries the Microsoft
-Graph API and returns results in [SYSTEM DATA]. This gives you:
-- All M365 users with account status (enabled/disabled)
-- License assignments (has_license, license_count)
-- Summary counts: total, active, disabled, licensed, disabled_with_license
-- Full user list with name, email, upn, title, department, enabled, has_license
+- Active/disabled accounts, license assignments, mailbox inventory
+- Data is queried automatically via Graph API — no approval needed, no PowerShell
+- ALWAYS read actual counts and names from [SYSTEM DATA], never fabricate them
 
-CRITICAL RULES for M365 data:
-- ALWAYS read the actual numbers from [SYSTEM DATA]. The summary section has exact counts.
-- ALWAYS list the actual user names/emails from the "users" array in [SYSTEM DATA].
-- Do NOT use PowerShell or WinRM to query user/mailbox data — the Graph API connector handles this automatically. There is NO approval needed for M365 queries.
-- NEVER fabricate user counts, names, or license information. If [SYSTEM DATA] shows 36 disabled accounts with licenses, say 36 — not 9, not 105.
-- NEVER say "data source didn't return results" when [SYSTEM DATA] contains user data.
-- When the user asks for names/details, list them from the [SYSTEM DATA] users array.
+MERAKI NETWORK:
+- Devices, clients, VLANs, DHCP, uplinks, device status, security events (IDS/IPS)
+- Data is queried automatically
+
+EMAIL (kevin@heads-up.com):
+- Send/reply to emails, search any mailbox, org-wide search
+- To send: include **To:** and **Subject:** headers in your response — the system sends it
+- NEVER claim "sent" without [SYSTEM DATA] confirmation
+
+ZENDESK TICKETS:
+- To create: include **Ticket Subject:**, **Ticket Priority:**, **Ticket Type:**, **Ticket Body:** headers
+- To update/comment: include **Ticket ID:**, **Action:**, **Details:** headers
+- The system parses headers from your response automatically — works from any conversation
 
 SLACK DIRECT MESSAGES:
-You can send a direct message to anyone on the Security team via Slack. Use this when you need
-to proactively alert someone, follow up on an incident, or share findings with a specific person.
-Format your DM request with these EXACT headers:
+- To DM someone: include **DM To:** user@heads-up.com and **DM Message:** headers
+- Only for legitimate security operations — never unsolicited
 
-**DM To:** user@heads-up.com
-**DM Message:**
-Your message content here.
+POWERSHELL (WinRM):
+- Propose commands with hostname only (no IPs): "on **HOSTNAME**:"
+- Include command in a code block with 8-char hex request ID
+- NEVER auto-execute — always wait for "approve <id>"
+- The system resolves IPs from Wazuh agent data automatically
 
-The system will send this as a Slack DM from you (Kevin). Only use this for legitimate
-security operations — incident notifications, follow-ups, or sharing requested information.
-NEVER DM someone unless the current user asks you to, or there is a genuine security reason.
-
-POWERSHELL REMOTE EXECUTION:
-When the user asks you to investigate a host (check processes, services, connections, 
-event logs, scheduled tasks, etc.), you can propose a PowerShell command to run remotely.
-
-How it works:
-1. You determine the right PowerShell command for the investigation
-2. You present it to the user with: the target host, the exact command, and your reasoning
-3. You generate a short request ID (8 hex characters) and ask them to reply "approve <id>"
-4. If they approve, the command executes via WinRM and you analyze the results
-5. If they deny, you acknowledge and suggest alternatives
-
-IMPORTANT — Host Resolution:
-- The system automatically resolves hostnames to IP addresses from Wazuh agent data.
-- You MUST use the HOSTNAME only (e.g., DC1-HUT, DESKTOP-ABC). Do NOT include IP addresses.
-- NEVER guess, invent, or include IP addresses in your proposals — the system resolves them.
-- If you don't know the hostname, ask the user. Never fabricate hostnames or IPs.
-- Do NOT prefix commands with "powershell" — just include the PowerShell command itself.
-
-Format your proposals EXACTLY like this:
-"I'd like to run the following on **DC1-HUT**:
-```
-Get-Process | Sort-Object CPU -Descending | Select -First 20
-```
-This will show us the top CPU-consuming processes to check for anything suspicious.
-Reply **approve a1b2c3d4** to execute, or **deny a1b2c3d4** to cancel."
-
-CRITICAL: Do NOT put an IP address after the hostname. Write "on **HOSTNAME**:" only.
-The system will resolve the IP automatically. Including an IP causes parsing failures.
-
-Generate the request ID as 8 random lowercase hex characters. Be specific about what 
-the command does and why you're proposing it. Never auto-execute — always wait for approval.
-
-When you receive PowerShell results in [SYSTEM DATA], analyze them in the context of the 
-investigation. Look for anomalies, suspicious processes, unusual connections, etc.
-
-When you receive security data in [SYSTEM DATA], give a clear summary first ("Here's what I'm seeing..."), 
-then dig into the details. Flag anything urgent right away. If you spot patterns or 
-correlations, call them out. Always be actionable — tell them what to do, not just what happened.
-
-When you do NOT receive security data, be honest: "I wasn't able to retrieve that data" or 
-"That data source didn't respond." Never fill in with made-up details.
-
-Keep your responses focused and human. A short, clear answer beats a comprehensive essay.""",
+═══ RESPONSE STYLE ═══
+- Give a clear summary first, then details. Flag urgent items immediately.
+- Call out patterns and correlations. Be actionable — say what to do, not just what happened.
+- Short and clear beats comprehensive and exhausting.""",
 
     "security-analyst": """You are Kevin Tutela, a friendly security operations assistant at Heads Up Technologies. 
 Your last name means "watchful care" in Latin — and that's exactly what you bring to the team.
@@ -561,6 +413,36 @@ class ClaudeWorker(BaseService):
                     logger.info("Asset inventory table ready")
                 except Exception as e:
                     logger.warning("Could not create asset table: %s", e)
+
+                # Query result cache — stores full connector responses for follow-up queries
+                try:
+                    with self._kb_conn.cursor() as cur3:
+                        cur3.execute("""
+                            CREATE TABLE IF NOT EXISTS knowledge.query_cache (
+                                id SERIAL PRIMARY KEY,
+                                cache_key VARCHAR(255) NOT NULL,
+                                user_email VARCHAR(255) NOT NULL,
+                                intent VARCHAR(100),
+                                data_source VARCHAR(100),
+                                summary TEXT DEFAULT '',
+                                full_data JSONB NOT NULL DEFAULT '{}',
+                                record_count INT DEFAULT 0,
+                                ttl_minutes INT DEFAULT 30,
+                                created_at TIMESTAMPTZ DEFAULT NOW(),
+                                expires_at TIMESTAMPTZ DEFAULT NOW() + INTERVAL '30 minutes'
+                            )
+                        """)
+                        cur3.execute("""
+                            CREATE INDEX IF NOT EXISTS idx_query_cache_key
+                            ON knowledge.query_cache (cache_key, user_email)
+                        """)
+                        cur3.execute("""
+                            CREATE INDEX IF NOT EXISTS idx_query_cache_expires
+                            ON knowledge.query_cache (expires_at)
+                        """)
+                    logger.info("Query cache table ready")
+                except Exception as e:
+                    logger.warning("Could not create query cache table: %s", e)
             except Exception as e:
                 logger.warning("Could not create memory tables: %s", e)
         except Exception as e:
@@ -675,6 +557,42 @@ class ClaudeWorker(BaseService):
         history = payload.get("history", [])
         intent = payload.get("intent", "general")
         data_context = payload.get("data_context", {})
+        user_email = actor.email if actor else "unknown"
+
+        # Cache any incoming connector data for follow-up queries
+        if data_context:
+            for key, data in data_context.items():
+                if key == "_timeout_notice" or not data:
+                    continue
+                self._cache_query_result(
+                    cache_key=f"{intent}:{key}",
+                    user_email=user_email,
+                    intent=intent,
+                    data_source=key,
+                    data=data,
+                    ttl_minutes=30,
+                )
+
+        # For follow-up queries with no fresh data, check the cache
+        # This handles "now create a ticket with those results" type requests
+        if not data_context and intent == "general":
+            # Check if user is referencing previous data
+            text_lower = user_text.lower()
+            reference_words = ["those", "that", "the list", "those results",
+                               "the data", "the names", "same", "previous",
+                               "we found", "we identified", "earlier",
+                               "create.*ticket.*with", "update.*ticket.*with"]
+            import re
+            if any(re.search(w, text_lower) for w in reference_words):
+                # Find the most recent cached query for this user
+                cached = self._get_recent_cache_for_user(user_email)
+                if cached:
+                    data_context = {cached["data_source"]: cached["data"]}
+                    logger.info(
+                        "Injected cached data from %s (%d records, cached %s)",
+                        cached["data_source"], cached["record_count"],
+                        cached["cached_at"],
+                    )
 
         # Select system prompt based on role hierarchy
         system_prompt = self._select_system_prompt(actor.roles if actor else [])
@@ -721,7 +639,6 @@ class ClaudeWorker(BaseService):
             logger.info("Injected company policy context (%d chars)", len(policy_context))
 
         # Load user memory — profile, active session, recent history
-        user_email = actor.email if actor else "unknown"
         self._ensure_user_profile(actor)
         user_memory = self._get_user_memory(user_email)
         if user_memory:
@@ -910,18 +827,17 @@ class ClaudeWorker(BaseService):
             logger.debug("Conversation summary update failed: %s", e)
 
         # Store messages in Kevin's own history
-        u_email = actor.email if actor else "unknown"
         data_keys = [k for k in data_context.keys() if k != "_timeout_notice"] if data_context else []
-        self._store_message(u_email, "user", user_text, intent=intent,
+        self._store_message(user_email, "user", user_text, intent=intent,
                             had_data=bool(data_context), data_sources=data_keys)
-        self._store_message(u_email, "assistant", response_text, intent=intent,
+        self._store_message(user_email, "assistant", response_text, intent=intent,
                             model_used=model_used, input_tokens=input_tokens,
                             output_tokens=output_tokens)
 
         # Learn about the user from this conversation
         try:
             self._update_user_profile_from_conversation(
-                user_email=u_email,
+                user_email=user_email,
                 user_text=user_text,
                 response_text=response_text,
             )
@@ -1067,6 +983,8 @@ class ClaudeWorker(BaseService):
                 sections.append(self._format_m365_users_data(data))
             elif "mailbox-usage" in key:
                 sections.append(self._format_mailbox_usage_data(data))
+            elif "zendesk" in key:
+                sections.append(self._format_zendesk_data(data))
             elif "email" in key:
                 sections.append(self._format_email_data(data))
             elif "user" in key:
@@ -1078,9 +996,18 @@ class ClaudeWorker(BaseService):
                     json_str = json_str[:4000] + "\n... [truncated]"
                 sections.append(f"### Data: {key}\n```json\n{json_str}\n```")
 
-        return "\n\n".join(sections)
+        result = "\n\n".join(sections)
 
-    def _format_signin_data(self, data: Dict) -> str:
+        # Cap total [SYSTEM DATA] size to prevent context overflow
+        MAX_DATA_CHARS = 16000
+        if len(result) > MAX_DATA_CHARS:
+            logger.warning(
+                "[SYSTEM DATA] too large (%d chars), truncating to %d",
+                len(result), MAX_DATA_CHARS,
+            )
+            result = result[:MAX_DATA_CHARS] + "\n\n... [DATA TRUNCATED — ask for specific details]"
+
+        return result
         """Format sign-in log data for the prompt."""
         summary = data.get("summary", {})
         logs = data.get("logs", [])
@@ -1164,7 +1091,7 @@ class ClaudeWorker(BaseService):
             text += "No user records returned.\n"
             return text
 
-        # Show disabled+licensed users first (most actionable)
+        # ALWAYS show disabled+licensed users (most actionable, usually small set)
         disabled_licensed = [u for u in users if not u.get("enabled") and u.get("has_license")]
         if disabled_licensed:
             text += f"**Disabled accounts with licenses ({len(disabled_licensed)}):**\n"
@@ -1172,20 +1099,26 @@ class ClaudeWorker(BaseService):
                 text += f"- {u.get('name', '?')} | {u.get('email') or u.get('upn', '?')} | {u.get('title', '')} | {u.get('department', '')} | Licenses: {u.get('license_count', 0)}\n"
             text += "\n"
 
-        # Show other disabled users (no license)
+        # Disabled without license — summarize if more than 20
         disabled_no_license = [u for u in users if not u.get("enabled") and not u.get("has_license")]
-        if disabled_no_license and len(disabled_no_license) <= 20:
-            text += f"**Disabled accounts without licenses ({len(disabled_no_license)}):**\n"
-            for u in disabled_no_license[:20]:
-                text += f"- {u.get('name', '?')} | {u.get('email') or u.get('upn', '?')}\n"
+        if disabled_no_license:
+            if len(disabled_no_license) <= 20:
+                text += f"**Disabled accounts without licenses ({len(disabled_no_license)}):**\n"
+                for u in disabled_no_license:
+                    text += f"- {u.get('name', '?')} | {u.get('email') or u.get('upn', '?')}\n"
+            else:
+                text += f"**Disabled accounts without licenses**: {len(disabled_no_license)} (ask for full list if needed)\n"
             text += "\n"
-        elif disabled_no_license:
-            text += f"**Disabled accounts without licenses**: {len(disabled_no_license)} (not listed for brevity)\n\n"
 
-        # Show active licensed users summary
+        # Active licensed — summarize count only (can be hundreds)
         active_licensed = [u for u in users if u.get("enabled") and u.get("has_license")]
         if active_licensed:
-            text += f"**Active licensed users**: {len(active_licensed)} (not listed — ask if you want details)\n"
+            text += f"**Active licensed users**: {len(active_licensed)} (ask for full list if needed)\n"
+
+        # Active unlicensed — just count
+        active_unlicensed = [u for u in users if u.get("enabled") and not u.get("has_license")]
+        if active_unlicensed:
+            text += f"**Active unlicensed users**: {len(active_unlicensed)}\n"
 
         return text
 
@@ -1276,6 +1209,53 @@ class ClaudeWorker(BaseService):
         text += f"**Title**: {user.get('jobTitle', '?')}\n"
         text += f"**Department**: {user.get('department', '?')}\n"
         text += f"**Account enabled**: {user.get('accountEnabled', '?')}\n"
+        return text
+
+
+    def _format_signin_data(self, data: Dict) -> str:
+        """Format sign-in log data for the prompt."""
+        summary = data.get("summary", {})
+        logs = data.get("logs", [])
+        text = "### Sign-in Log Data\n"
+        if summary:
+            text += "**Summary**: %d sign-ins, %d failures, %d risky, %d unique IPs\n" % (
+                summary.get("total", 0), summary.get("failures", 0),
+                summary.get("risky_signins", 0), summary.get("unique_ips", 0))
+        if logs:
+            text += "\n**Recent events** (showing %d of %d):\n" % (min(len(logs), 10), len(logs))
+            for log in logs[:10]:
+                status = log.get("status", {})
+                ec = status.get("errorCode", 0)
+                ss = "OK" if ec == 0 else "FAIL (%s)" % ec
+                text += "- %s | %s | %s | %s | %s | risk: %s\n" % (
+                    log.get("createdDateTime", "?"), log.get("userDisplayName", "?"),
+                    log.get("appDisplayName", "?"), log.get("ipAddress", "?"),
+                    ss, log.get("riskLevelDuringSignIn", "none"))
+        return text
+
+    def _format_zendesk_data(self, data: Dict) -> str:
+        """Format ZenDesk ticket data for the prompt."""
+        tickets = data.get("tickets", [])
+        query = data.get("query", "")
+        count = data.get("count", len(tickets))
+        text = "### ZenDesk Tickets (%d found)\n" % count
+        if query:
+            text += "Query: %s\n\n" % query
+        if not tickets:
+            text += "No tickets found.\n"
+            return text
+        by_status = {}
+        for t in tickets:
+            s = t.get("status", "unknown")
+            by_status.setdefault(s, []).append(t)
+        text += "**By status**: " + ", ".join("%s: %d" % (s, len(v)) for s, v in by_status.items()) + "\n\n"
+        for t in tickets[:25]:
+            text += "- #%s [%s] [%s] %s\n  Created: %s | Type: %s | Tags: %s\n" % (
+                t.get("id", "?"), t.get("priority", "-"), t.get("status", "?"),
+                t.get("subject", "(no subject)"), str(t.get("created_at", "?"))[:10],
+                t.get("type", "?"), ", ".join(t.get("tags", [])))
+        if len(tickets) > 25:
+            text += "\n... and %d more tickets\n" % (len(tickets) - 25)
         return text
 
     # ── Knowledge Extraction ────────────────────────────────────────
@@ -1509,72 +1489,16 @@ Only extract concrete facts actually stated. Do NOT guess.
 Return ONLY valid JSON, no markdown."""
 
     def _get_user_memory(self, user_email: str) -> str:
-        """Load Kevin's full memory about this user — profile + active session + recent history."""
+        """Load Kevin's memory: session first (most important), then history, then profile."""
         if not self._ensure_kb_connection():
             return ""
 
-        sections = []
+        profile_section = ""
+        session_section = ""
+        history_section = ""
 
         try:
-            # Load user profile
-            with self._kb_conn.cursor() as cur:
-                cur.execute("""
-                    SELECT display_name, first_name, preferred_name, job_title,
-                           department, manager_email, location, timezone,
-                           first_interaction, total_interactions,
-                           rapport_notes, preferences, work_context
-                    FROM knowledge.user_profiles
-                    WHERE user_email = %s
-                """, [user_email])
-                profile = cur.fetchone()
-
-                if profile:
-                    (name, first, preferred, title, dept, manager, loc, tz,
-                     first_int, total, rapport, prefs, work) = profile
-
-                    lines = ["[USER PROFILE — What you know about this person]"]
-                    lines.append(f"Name: {name or 'Unknown'}" +
-                                 (f" (goes by {preferred})" if preferred else ""))
-                    if title:
-                        lines.append(f"Title: {title}")
-                    if dept:
-                        lines.append(f"Department: {dept}")
-                    if manager:
-                        lines.append(f"Manager: {manager}")
-                    if loc:
-                        lines.append(f"Location: {loc}")
-                    if total:
-                        lines.append(f"You've had {total} conversations with them" +
-                                     (f" since {first_int.strftime('%B %Y')}" if first_int else ""))
-                    if rapport:
-                        lines.append(f"Notes: {rapport}")
-
-                    if prefs and isinstance(prefs, dict):
-                        pref_items = []
-                        for k, v in prefs.items():
-                            if isinstance(v, list) and v:
-                                pref_items.append(f"{k}: {', '.join(str(x) for x in v)}")
-                            elif v:
-                                pref_items.append(f"{k}: {v}")
-                        if pref_items:
-                            lines.append("Preferences: " + "; ".join(pref_items))
-
-                    if work and isinstance(work, dict):
-                        work_items = []
-                        for k, v in work.items():
-                            if isinstance(v, list) and v:
-                                work_items.append(f"{k}: {', '.join(str(x) for x in v)}")
-                            elif v:
-                                work_items.append(f"{k}: {v}")
-                        if work_items:
-                            lines.append("Work context: " + "; ".join(work_items))
-
-                    lines.append(
-                        "Use this knowledge naturally. Don't recite their profile back to them."
-                    )
-                    sections.append("\n".join(lines))
-
-            # Load conversation session
+            # 1. ACTIVE SESSION — most important for continuity
             with self._kb_conn.cursor() as cur:
                 cur.execute("""
                     SELECT summary, topic, key_entities, open_questions, last_action,
@@ -1602,41 +1526,68 @@ Return ONLY valid JSON, no markdown."""
                         lines.append(
                             "Maintain continuity — the user expects you to remember this."
                         )
-                        sections.append("\n".join(lines))
+                        session_section = "\n".join(lines)
 
-            # Load recent message history as fallback context
+            # 2. RECENT MESSAGE HISTORY — always include last few exchanges
             with self._kb_conn.cursor() as cur:
                 cur.execute("""
                     SELECT role, content, created_at
                     FROM knowledge.message_history
                     WHERE user_email = %s AND agent_id = 'kevin'
                     ORDER BY created_at DESC
-                    LIMIT 10
+                    LIMIT 6
                 """, [user_email])
                 recent = cur.fetchall()
 
-                if recent and not session:
+                if recent:
                     recent.reverse()
-                    lines = ["[RECENT HISTORY — Last few exchanges with this user]"]
+                    lines = ["[RECENT HISTORY — Last few exchanges]"]
                     for role, content, ts in recent:
                         speaker = "User" if role == "user" else "Kevin"
-                        snippet = content[:150] + "..." if len(content) > 150 else content
+                        snippet = content[:200] + "..." if len(content) > 200 else content
                         lines.append(f"  {speaker}: {snippet}")
-                    sections.append("\n".join(lines))
+                    history_section = "\n".join(lines)
+
+            # 3. USER PROFILE — compact version, least priority
+            with self._kb_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT display_name, preferred_name, job_title,
+                           department, total_interactions, rapport_notes
+                    FROM knowledge.user_profiles
+                    WHERE user_email = %s
+                """, [user_email])
+                profile = cur.fetchone()
+
+                if profile:
+                    name, preferred, title, dept, total, rapport = profile
+                    parts = [f"[USER] {name or 'Unknown'}"]
+                    if preferred:
+                        parts.append(f"(goes by {preferred})")
+                    if title:
+                        parts.append(f"| {title}")
+                    if dept:
+                        parts.append(f"| {dept}")
+                    if total and total > 1:
+                        parts.append(f"| {total} conversations")
+                    profile_section = " ".join(parts)
+                    if rapport:
+                        profile_section += f"\nNotes: {rapport[:500]}"
 
         except Exception as e:
             logger.debug("Could not load user memory: %s", e)
 
+        # Assemble in priority order: session > history > profile
+        sections = [s for s in [session_section, history_section, profile_section] if s]
         memory = "\n\n".join(sections) if sections else ""
 
-        # Cap user memory to prevent overwhelming [SYSTEM DATA] in context
-        MAX_MEMORY_CHARS = 8000
+        # Cap total memory — generous limit, the real size control is on [SYSTEM DATA]
+        MAX_MEMORY_CHARS = 32000
         if len(memory) > MAX_MEMORY_CHARS:
             logger.warning(
                 "User memory too large (%d chars), truncating to %d",
                 len(memory), MAX_MEMORY_CHARS,
             )
-            memory = memory[:MAX_MEMORY_CHARS] + "\n... [memory truncated for context space]"
+            memory = memory[:MAX_MEMORY_CHARS] + "\n... [memory truncated]"
 
         return memory
 
@@ -1980,6 +1931,139 @@ Return ONLY valid JSON, no markdown."""
             logger.debug("Profile update returned invalid JSON")
         except Exception as e:
             logger.debug("Profile update error: %s", e)
+
+    # ── Query Result Cache ────────────────────────────────────────────
+
+    def _cache_query_result(
+        self, cache_key: str, user_email: str, intent: str,
+        data_source: str, data: Dict[str, Any], summary: str = "",
+        ttl_minutes: int = 30,
+    ) -> None:
+        """Store a connector's full response in the query cache."""
+        if not self._ensure_kb_connection():
+            return
+        try:
+            record_count = 0
+            if isinstance(data, dict):
+                # Count records in common list fields
+                for field in ("users", "alerts", "logs", "messages", "devices",
+                              "clients", "mailboxes", "risky_users"):
+                    if field in data and isinstance(data[field], list):
+                        record_count = len(data[field])
+                        break
+                if not record_count:
+                    record_count = data.get("count", 0)
+
+            with self._kb_conn.cursor() as cur:
+                # Clean expired entries first
+                cur.execute("DELETE FROM knowledge.query_cache WHERE expires_at < NOW()")
+
+                # Upsert the cache entry
+                cur.execute("""
+                    INSERT INTO knowledge.query_cache
+                        (cache_key, user_email, intent, data_source, summary,
+                         full_data, record_count, ttl_minutes, expires_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                            NOW() + INTERVAL '1 minute' * %s)
+                    ON CONFLICT (id) DO NOTHING
+                """, [
+                    cache_key, user_email, intent, data_source, summary,
+                    json.dumps(data, default=str), record_count, ttl_minutes,
+                    ttl_minutes,
+                ])
+
+            logger.info(
+                "Cached query result: key=%s source=%s records=%d ttl=%dm",
+                cache_key, data_source, record_count, ttl_minutes,
+            )
+        except Exception as e:
+            logger.debug("Failed to cache query result: %s", e)
+
+    def _get_cached_query(self, cache_key: str, user_email: str) -> Optional[Dict]:
+        """Retrieve a cached query result if still valid."""
+        if not self._ensure_kb_connection():
+            return None
+        try:
+            with self._kb_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT full_data, summary, data_source, record_count, created_at
+                    FROM knowledge.query_cache
+                    WHERE cache_key = %s AND user_email = %s
+                    AND expires_at > NOW()
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """, [cache_key, user_email])
+                row = cur.fetchone()
+                if row:
+                    logger.info("Cache hit: key=%s records=%d", cache_key, row[3])
+                    return {
+                        "data": row[0] if isinstance(row[0], dict) else json.loads(row[0]),
+                        "summary": row[1],
+                        "data_source": row[2],
+                        "record_count": row[3],
+                        "cached_at": row[4],
+                    }
+        except Exception as e:
+            logger.debug("Cache lookup failed: %s", e)
+        return None
+
+    def _get_cached_query_by_source(self, data_source: str, user_email: str) -> Optional[Dict]:
+        """Retrieve the most recent cached result for a data source."""
+        if not self._ensure_kb_connection():
+            return None
+        try:
+            with self._kb_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT full_data, summary, cache_key, record_count, created_at
+                    FROM knowledge.query_cache
+                    WHERE data_source = %s AND user_email = %s
+                    AND expires_at > NOW()
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """, [data_source, user_email])
+                row = cur.fetchone()
+                if row:
+                    logger.info("Cache hit by source: %s records=%d", data_source, row[3])
+                    return {
+                        "data": row[0] if isinstance(row[0], dict) else json.loads(row[0]),
+                        "summary": row[1],
+                        "cache_key": row[2],
+                        "record_count": row[3],
+                        "cached_at": row[4],
+                    }
+        except Exception as e:
+            logger.debug("Cache lookup by source failed: %s", e)
+        return None
+
+    def _get_recent_cache_for_user(self, user_email: str) -> Optional[Dict]:
+        """Get the most recent non-expired cached query for a user."""
+        if not self._ensure_kb_connection():
+            return None
+        try:
+            with self._kb_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT full_data, summary, data_source, record_count,
+                           created_at, cache_key
+                    FROM knowledge.query_cache
+                    WHERE user_email = %s AND expires_at > NOW()
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """, [user_email])
+                row = cur.fetchone()
+                if row:
+                    logger.info("Recent cache hit for %s: source=%s records=%d",
+                                user_email, row[2], row[3])
+                    return {
+                        "data": row[0] if isinstance(row[0], dict) else json.loads(row[0]),
+                        "summary": row[1],
+                        "data_source": row[2],
+                        "record_count": row[3],
+                        "cached_at": row[4],
+                        "cache_key": row[5],
+                    }
+        except Exception as e:
+            logger.debug("Recent cache lookup failed: %s", e)
+        return None
 
     # ── Knowledge Base ───────────────────────────────────────────────
 

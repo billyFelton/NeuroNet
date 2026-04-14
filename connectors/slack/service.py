@@ -246,7 +246,6 @@ class SlackConnector(BaseService):
             if req.type == "events_api":
                 event = req.payload.get("event", {})
                 event_type = event.get("type")
-
                 if event_type == "message":
                     self._handle_message_event(event)
                 elif event_type == "app_mention":
@@ -384,9 +383,30 @@ class SlackConnector(BaseService):
         4. Keyword/pattern match in monitored channels — respond
         5. Everything else — stay silent
         """
-        # 1. DMs — always respond
+        # 1. DMs — only respond if Kevin is a participant
         if channel_type == "im":
-            return TriggerResult("direct_message")
+            # Cache known DM channels
+            if not hasattr(self, "_kevin_dm_channels"):
+                self._kevin_dm_channels = set()
+                self._non_kevin_dm_channels = set()
+
+            if channel in self._kevin_dm_channels:
+                return TriggerResult("direct_message")
+            if channel in self._non_kevin_dm_channels:
+                return None
+
+            # Test: try posting a typing indicator — if it works, Kevin is in this DM
+            try:
+                # chat.postMessage would send a real message, so instead
+                # just try to read the last message — if Kevin has im:history, this works
+                self._web_client.conversations_history(channel=channel, limit=1)
+                self._kevin_dm_channels.add(channel)
+                logger.info("Verified Kevin DM channel: %s", channel)
+                return TriggerResult("direct_message")
+            except Exception as e:
+                self._non_kevin_dm_channels.add(channel)
+                logger.info("Ignoring DM channel %s — not Kevin's: %s", channel, e)
+                return None
 
         # 2. @mention in text (backup — app_mention event usually catches this)
         if f"<@{self._bot_user_id}>" in text:
