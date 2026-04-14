@@ -830,11 +830,21 @@ class ClaudeWorker(BaseService):
             logger.debug("Slack DM check failed: %s", e)
 
         # Check if Kevin is updating the knowledge base (ai-admin only)
+        # Only process KB updates when the USER explicitly asked for a KB change
         try:
             if "**KB Update User:**" in response_text:
-                self._handle_kb_update(response_text, envelope)
-                if debug_level != "none":
-                    debug_trace.append(":brain: *Action:* Knowledge base update executed")
+                user_lower = user_text.lower()
+                kb_requested = any(w in user_lower for w in [
+                    "update", "remember", "set", "change", "prefer",
+                    "goes by", "nickname", "likes", "loves", "interests",
+                    "kb update", "knowledge base", "profile",
+                ])
+                if kb_requested:
+                    self._handle_kb_update(response_text, envelope)
+                    if debug_level != "none":
+                        debug_trace.append(":brain: *Action:* Knowledge base update executed")
+                else:
+                    logger.info("KB update headers found but user did not request KB change — skipping")
         except Exception as e:
             logger.error("KB update failed: %s", e)
 
@@ -2362,6 +2372,49 @@ Return ONLY valid JSON, no markdown."""
             ilike_patterns = [f"%{w}%" for w in search_words]
 
             logger.info("Knowledge search: text=%r words=%s", user_text[:80], search_words)
+
+            # Check if user is asking about conversation history/users
+            text_lower = user_text.lower()
+            chat_query = any(w in text_lower for w in [
+                "chatted", "talked", "spoken", "conversations",
+                "who have you", "who do you", "users you know",
+                "people you", "how many users", "chat history",
+                "conversation history",
+            ])
+            if chat_query:
+                with self._kb_conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT user_email, 
+                               count(*) FILTER (WHERE role='user') as user_msgs,
+                               count(*) FILTER (WHERE role='assistant') as kevin_msgs,
+                               min(created_at)::date as first_chat,
+                               max(created_at)::date as last_chat
+                        FROM knowledge.message_history
+                        GROUP BY user_email
+                        ORDER BY max(created_at) DESC
+                    """)
+                    rows = cur.fetchall()
+                    if rows:
+                        lines = ["[CONVERSATION HISTORY — Users Kevin has chatted with]"]
+                        for email, u_msgs, k_msgs, first, last in rows:
+                            lines.append(f"- {email}: {u_msgs} messages, last chat: {last}, first chat: {first}")
+                        lines.append(f"Total: {len(rows)} users")
+                        sections.append("\n".join(lines))
+
+                    # Today's activity
+                    cur.execute("""
+                        SELECT user_email, count(*) as msgs
+                        FROM knowledge.message_history
+                        WHERE created_at > NOW() - INTERVAL '24 hours'
+                        GROUP BY user_email
+                        ORDER BY msgs DESC
+                    """)
+                    today = cur.fetchall()
+                    if today:
+                        lines = ["[TODAY'S CONVERSATIONS]"]
+                        for email, msgs in today:
+                            lines.append(f"- {email}: {msgs} messages today")
+                        sections.append("\n".join(lines))
 
             # Full-text search on knowledge entries
             with self._kb_conn.cursor() as cur:

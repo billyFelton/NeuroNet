@@ -205,7 +205,7 @@ INTENT_PATTERNS = [
         ),
     },
     {
-        "pattern": r"\b(device|devices|laptop|workstation|enrolled)\b",
+        "pattern": r"\b(enrolled\s+device|intune\s+device|managed\s+device|mdm\s+device|registered\s+device|entra\s+device|azure\s+ad\s+device)\b",
         "intent": Intent(
             name="device_query",
             resources=[("entra-users", "query")],
